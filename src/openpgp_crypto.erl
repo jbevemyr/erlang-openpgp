@@ -17,6 +17,7 @@
 
 -export([
     import_public/1,
+    import_public_key/1,
     import_keypair/1,
     export_public/2,
     export_public_key/2,
@@ -32,6 +33,9 @@
 
 -type crypto_pub() :: {rsa, rsa_pub()} | {ed25519, ed_pub()}.
 -type crypto_priv() :: {rsa, rsa_priv()} | {ed25519, {ed_pub(), ed_priv()}}.
+
+-type public_key_pub() ::
+    #'RSAPublicKey'{} | {#'ECPoint'{}, {namedCurve, term()}}.
 
 -type export_opts() :: #{
     userid := iodata() | binary(),
@@ -133,6 +137,25 @@ import_public(Input) ->
                 error ->
                     {error, no_public_key_packet}
             end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @doc Import a public key and return it in `public_key` record/tuple format:
+%% - RSA: `#'RSAPublicKey'{modulus=N, publicExponent=E}`
+%% - Ed25519: `{#'ECPoint'{point = Pub32}, {namedCurve, pubkey_cert_records:namedCurves(ed25519)}}`
+-spec import_public_key(iodata() | binary()) -> {ok, public_key_pub()} | {error, term()}.
+import_public_key(Input) ->
+    case import_public(Input) of
+        {ok, {rsa, [Ebin, Nbin]}} ->
+            {ok,
+                #'RSAPublicKey'{
+                    modulus = binary:decode_unsigned(Nbin),
+                    publicExponent = binary:decode_unsigned(Ebin)
+                }};
+        {ok, {ed25519, Pub32}} ->
+            Params = {namedCurve, pubkey_cert_records:namedCurves(ed25519)},
+            {ok, {#'ECPoint'{point = Pub32}, Params}};
         {error, _} = Err ->
             Err
     end.

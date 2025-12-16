@@ -2,6 +2,7 @@
 -module(openpgp_format_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 crc24_test() ->
     % CRC-24/OPENPGP check value for "123456789" is 0x21CF02
@@ -38,5 +39,20 @@ public_key_created_info_test() ->
     ?assertEqual(ed25519, Alg),
     ?assert(Created >= Now1),
     ?assert(Created =< Now2).
+
+import_public_key_internal_formats_test() ->
+    % RSA
+    {PubRsa, _PrivRsa} = crypto:generate_key(rsa, {1024, 65537}),
+    {ok, ArmoredRsa, _FprRsa} =
+        openpgp_crypto:export_public({rsa, PubRsa}, #{userid => <<"T <t@e>">>}),
+    {ok, RsaRec} = openpgp_crypto:import_public_key(ArmoredRsa),
+    ?assertMatch(#'RSAPublicKey'{}, RsaRec),
+
+    % Ed25519
+    {PubEd, _PrivEd} = crypto:generate_key(eddsa, ed25519),
+    {ok, ArmoredEd, _FprEd} =
+        openpgp_crypto:export_public({ed25519, PubEd}, #{userid => <<"T <t@e>">>}),
+    {ok, {#'ECPoint'{point = PubEd2}, {namedCurve, _}}} = openpgp_crypto:import_public_key(ArmoredEd),
+    ?assertEqual(PubEd, PubEd2).
 
 
