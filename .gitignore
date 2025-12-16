@@ -1,0 +1,21 @@
+# Erlang build output
+ebin/
+_build/
+
+# Dialyzer
+.dialyzer_plt
+
+# Crash dumps
+erl_crash.dump
+crash.dump
+
+# Editor
+.vscode/
+
+# OS / misc
+*.swp
+*.swo
+*~
+.DS_Store
+
+
