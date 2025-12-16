@@ -484,7 +484,14 @@ gpg(Home, Args) ->
     Port =
         open_port(
             {spawn_executable, Gpg},
-            [binary, exit_status, stderr_to_stdout, use_stdio, hide, {args, ["--homedir", Home | Args]}]
+            [
+                binary,
+                exit_status,
+                stderr_to_stdout,
+                use_stdio,
+                hide,
+                {args, ["--no-options", "--no-tty", "--homedir", Home | Args]}
+            ]
         ),
     collect(Port, <<>>).
 
