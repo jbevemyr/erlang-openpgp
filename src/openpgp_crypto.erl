@@ -21,7 +21,8 @@
     export_public/2,
     export_public_key/2,
     export_secret/2,
-    export_secret_key/2
+    export_secret_key/2,
+    public_key_info/1
 ]).
 
 -type rsa_pub() :: [binary()]. % [E,N] as returned by crypto:generate_key/2
@@ -38,6 +39,25 @@
     % Optional: if present we add a self-cert signature.
     signing_key => rsa_priv() | ed_priv()
 }.
+
+%% @doc Extract metadata from a public OpenPGP key block (or raw packet bytes).
+%%
+%% Returns v4 `created` time (unix seconds) from the Public-Key packet body.
+-spec public_key_info(iodata() | binary()) ->
+    {ok, #{created := non_neg_integer(), alg := rsa | ed25519 | unknown, fingerprint := binary(), keyid := binary()}}
+    | {error, term()}.
+public_key_info(Input) ->
+    case gpg_keys:decode(Input) of
+        {ok, #{packets := Packets}} ->
+            case find_packet(6, Packets) of
+                {ok, Body} ->
+                    public_key_body_info(Body);
+                error ->
+                    {error, no_public_key_packet}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Export an unencrypted secret OpenPGP key block from OTP crypto key formats.
 %%
@@ -356,6 +376,19 @@ parse_public_key_body(<<4:8, _Created:32/big-unsigned, 22:8, OidLen:8, Oid:OidLe
             end
     end;
 parse_public_key_body(_Other) ->
+    {error, unsupported_public_key_format}.
+
+public_key_body_info(<<4:8, Created:32/big-unsigned, AlgId:8, _/binary>> = Body) ->
+    Alg =
+        case AlgId of
+            1 -> rsa;
+            22 -> ed25519;
+            _ -> unknown
+        end,
+    Fpr = openpgp_fingerprint:v4_fingerprint(Body),
+    KeyId = openpgp_fingerprint:keyid_from_fingerprint(Fpr),
+    {ok, #{created => Created, alg => Alg, fingerprint => Fpr, keyid => KeyId}};
+public_key_body_info(_Body) ->
     {error, unsupported_public_key_format}.
 
 parse_rsa_secret_key_body(E, N, SecBody) when is_binary(E), is_binary(N), is_binary(SecBody) ->

@@ -29,4 +29,14 @@ malformed_signature_test() ->
     ?assertEqual({error, #{reason => malformed_signature, message => <<"malformed signature">>}},
                  openpgp_detached_sig:verify(Data, BadSig, {ed25519, <<0:256>>})).
 
+public_key_created_info_test() ->
+    Now1 = erlang:system_time(second),
+    KB = openpgp_keygen:ed25519(<<"Test <test@example.com>">>),
+    Pub = gpg_keys:encode_public(maps:get(public_packets, KB)),
+    {ok, #{created := Created, alg := Alg}} = openpgp_crypto:public_key_info(Pub),
+    Now2 = erlang:system_time(second),
+    ?assertEqual(ed25519, Alg),
+    ?assert(Created >= Now1),
+    ?assert(Created =< Now2).
+
 
