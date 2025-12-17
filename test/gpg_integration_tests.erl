@@ -11,23 +11,44 @@ gpg_required_test_() ->
         false ->
             {skip, "gpg saknas i PATH"};
         _ ->
-            case gpg_preflight() of
-                ok ->
-                    [
-                        {"gpg -> Erlang decode/encode -> gpg import (RSA)", fun rsa_roundtrip/0},
-                        {"gpg -> Erlang decode/encode -> gpg import (Ed25519)", fun ed25519_roundtrip/0},
-                        {"Erlang -> gpg import (RSA, public+secret)", fun erlang_rsa_to_gpg_import/0},
-                        {"Erlang -> gpg import (Ed25519, public+secret)", fun erlang_ed25519_to_gpg_import/0},
-                        {"gpg -> crypto-format (RSA/Ed25519)", fun gpg_to_crypto_public/0},
-                        {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0}
-                        ,{"signera i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0}
-                        ,{"signera i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0}
-                        ,{"clearsign i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0}
-                        ,{"clearsign i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0}
-                        ,{"exportera secret key från crypto-format och importera i gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
-                    ];
+            case should_run_gpg_tests() of
                 {skip, Reason} ->
-                    {skip, Reason}
+                    {skip, Reason};
+                ok ->
+                    case gpg_preflight() of
+                        ok ->
+                            [
+                                {"gpg -> Erlang decode/encode -> gpg import (RSA)", fun rsa_roundtrip/0},
+                                {"gpg -> Erlang decode/encode -> gpg import (Ed25519)", fun ed25519_roundtrip/0},
+                                {"Erlang -> gpg import (RSA, public+secret)", fun erlang_rsa_to_gpg_import/0},
+                                {"Erlang -> gpg import (Ed25519, public+secret)", fun erlang_ed25519_to_gpg_import/0},
+                                {"gpg -> crypto-format (RSA/Ed25519)", fun gpg_to_crypto_public/0},
+                                {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0}
+                                ,{"signera i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0}
+                                ,{"signera i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0}
+                                ,{"clearsign i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0}
+                                ,{"clearsign i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0}
+                                ,{"exportera secret key från crypto-format och importera i gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
+                            ];
+                        {skip, Reason} ->
+                            {skip, Reason}
+                    end
+            end
+    end.
+
+should_run_gpg_tests() ->
+    % Default: run locally. In CI: require explicit opt-in, because many runners
+    % have broken/locked-down gpg-agent/keyboxd setups.
+    case os:getenv("RUN_GPG_TESTS") of
+        "1" ->
+            ok;
+        "true" ->
+            ok;
+        _ ->
+            case os:getenv("CI") of
+                false -> ok;
+                "" -> ok;
+                _ -> {skip, "CI-miljö: sätt RUN_GPG_TESTS=1 för att köra gpg-integrationstesterna"}
             end
     end.
 
@@ -557,10 +578,23 @@ collect(Port, Acc) ->
         {Port, {exit_status, 0}} ->
             {ok, Acc};
         {Port, {exit_status, Status}} ->
+            maybe_debug_gpg_failure(Status, Acc),
             {error, {gpg_failed, Status, Acc}}
     after 120000 ->
         catch port_close(Port),
         {error, timeout}
+    end.
+
+maybe_debug_gpg_failure(Status, Out) ->
+    case os:getenv("GPG_IT_DEBUG") of
+        "1" ->
+            io:format("gpg failed status=~p~n~s~n", [Status, Out]),
+            ok;
+        "true" ->
+            io:format("gpg failed status=~p~n~s~n", [Status, Out]),
+            ok;
+        _ ->
+            ok
     end.
 
 hex_lower(Bin) when is_binary(Bin) ->
