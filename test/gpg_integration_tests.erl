@@ -38,11 +38,11 @@ gpg_tests() ->
         {"Erlang -> gpg import (Ed25519, public+secret)", fun erlang_ed25519_to_gpg_import/0},
         {"gpg -> crypto-format (RSA/Ed25519)", fun gpg_to_crypto_public/0},
         {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0},
-        {"signera i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0},
-        {"signera i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
-        {"clearsign i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0},
-        {"clearsign i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0},
-        {"exportera secret key från crypto-format och importera i gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
+        {"sign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0},
+        {"sign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
+        {"clearsign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0},
+        {"clearsign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0},
+        {"export secret key from crypto-format and import into gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
     ].
 
 should_run_gpg_tests() ->
@@ -57,7 +57,7 @@ should_run_gpg_tests() ->
             case os:getenv("CI") of
                 false -> ok;
                 "" -> ok;
-                _ -> {skip, "CI-miljö: sätt RUN_GPG_TESTS=1 för att köra gpg-integrationstesterna"}
+                _ -> {skip, "CI environment: set RUN_GPG_TESTS=1 to run gpg integration tests"}
             end
     end.
 
@@ -415,7 +415,7 @@ gen_key(Home, ed25519, Email) ->
             % Backwards-compat: treat curve-not-supported as skip.
             case binary:match(Out, <<"ed25519">>) of
                 nomatch -> error({gpg_failed, Out});
-                _ -> {skip, "GnuPG verkar inte stödja ed25519-nyckelgenerering i batchläge i denna miljö"}
+                _ -> {skip, "GnuPG does not appear to support Ed25519 key generation in batch mode in this environment"}
             end
     end.
 

@@ -2,7 +2,7 @@
 
 EBIN=ebin
 PLT=.dialyzer_plt
-# public_key drar in asn1; dialyzer/OTP kan även behöva compiler/parsetools/syntax_tools för typer.
+# public_key depends on asn1; Dialyzer/OTP may also need compiler/parsetools/syntax_tools for types.
 DIALYZER_APPS=erts kernel stdlib crypto public_key asn1 compiler parsetools syntax_tools
 DIALYZER_BEAMS=$(filter-out $(EBIN)/%_tests.beam,$(wildcard $(EBIN)/*.beam))
 

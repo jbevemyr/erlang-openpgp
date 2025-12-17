@@ -1,50 +1,50 @@
-## gpg_keys (Erlang) – utan `gpg`
+## erlang-openpgp (Erlang) – without `gpg`
 
-Ren Erlang-kod för att **avkoda** och **koda** OpenPGP/GPG-nyckelblock i “gpg-format”:
+Pure Erlang code to **decode** and **encode** OpenPGP/GPG key material in “gpg format”:
 
-- **ASCII Armor** (`-----BEGIN PGP ...-----`) inkl. Base64 och CRC24
-- **OpenPGP packets** (RFC 4880) – vi parsar/serialiserar packet-ramning (tag + längd + body)
+- **ASCII Armor** (`-----BEGIN PGP ...-----`) including Base64 and CRC24
+- **OpenPGP packets** (RFC 4880) – parse/serialize packet framing (tag + length + body)
 
-Detta hanterar alltså formatet, men **hanterar inte** keyring, signaturvalidering eller kryptografiska operationer.
+This repo focuses on OpenPGP formats and interoperability, and includes key import/export and basic signing/verification helpers (RSA + Ed25519).
 
-### Exempel
+### Examples
 
-Avkoda en armorerad publik nyckel (eller privat) till packets:
+Decode an armored public key (or secret key) into packets:
 
 ```erlang
 {ok, #{armor := Armor, packets := Packets}} = gpg_keys:decode(PubArmoredBinOrString).
 ```
 
-Koda packets tillbaka till en armorerad publik nyckel:
+Encode packets back into an armored public key:
 
 ```erlang
 Armored = gpg_keys:encode_public(Packets).
 ```
 
-Om du redan har rå packet-binära data (utan ASCII armor):
+If you already have raw packet binary data (without ASCII armor):
 
 ```erlang
 Armored2 = gpg_keys:encode_public(RawPacketsBinary).
 ```
 
-### OpenPGP ↔ crypto-format (OTP)
+### OpenPGP ↔ crypto format (OTP)
 
-Modulen `openpgp_crypto` kan konvertera mellan OpenPGP-nyckelblock och format som OTP:s `crypto` förstår.
+The `openpgp_crypto` module converts between OpenPGP key blocks and formats understood by OTP `crypto`.
 
-Importera publik nyckel från GPG/OpenPGP till crypto-format:
+Import a public key from GPG/OpenPGP into crypto format:
 
 ```erlang
 {ok, {rsa, [E, N]}} = openpgp_crypto:import_public(ArmoredOrBinary).
 {ok, {ed25519, Pub32}} = openpgp_crypto:import_public(ArmoredOrBinary).
 ```
 
-Importera (unencrypted) secret key om den finns:
+Import an (unencrypted) secret key if present:
 
 ```erlang
 {ok, #{public := Pub, secret := SecretOrUndefined}} = openpgp_crypto:import_keypair(ArmoredOrBinary).
 ```
 
-Exportera publik nyckel från crypto-format till OpenPGP (GPG-format). För bäst kompatibilitet kan du ge med en signing key för self-cert:
+Export a public key from crypto format to OpenPGP (GPG format). For best compatibility, provide a signing key for a self-certification signature:
 
 ```erlang
 {PubRsa, PrivRsa} = crypto:generate_key(rsa, {2048, 65537}),
@@ -64,36 +64,36 @@ Exportera publik nyckel från crypto-format till OpenPGP (GPG-format). För bäs
     }).
 ```
 
-### Export från `public_key`-record-format
+### Export from `public_key` record formats
 
-Om du har nycklar som ASN.1-records (t.ex. `#'RSAPublicKey'{...}` eller Ed25519 från `public_key:generate_key/1`)
-kan du exportera direkt med `openpgp_crypto:export_public_key/2`:
+If you have keys as ASN.1 records (e.g. `#'RSAPublicKey'{...}` or Ed25519 from `public_key:generate_key/1`),
+you can export directly using `openpgp_crypto:export_public_key/2`:
 
 ```erlang
 {ok, Armored, _Fpr} =
     openpgp_crypto:export_public_key(RsaPubRec, #{userid => <<"Me <me@example.com>">>}).
 ```
 
-För Ed25519 från:
+For Ed25519 from:
 
 ```erlang
 Spec = {namedCurve, pubkey_cert_records:namedCurves(ed25519)},
 {PubRec, PrivRec} = public_key:generate_key(Spec).
 ```
 
-…kan du exportera antingen från publika recordet eller från privata (om den innehåller privateKey kan vi self-signa):
+…you can export either from the public record, or from the private record (if it contains the privateKey we can self-sign):
 
 ```erlang
 {ok, Armored, _Fpr} =
     openpgp_crypto:export_public_key(PubRec, #{userid => <<"Me <me@example.com>">>}).
 ```
 
-### Export av privat nyckel (PGP PRIVATE KEY BLOCK)
+### Export secret keys (PGP PRIVATE KEY BLOCK)
 
-Det går att exportera **privata nycklar** också – men just nu exporterar vi endast **okrypterade** secret keys
-(S2K usage = `0`). Hantera output som hemlig information.
+Exporting **secret keys** is supported, but currently only **unencrypted** secret keys are exported
+(S2K usage = `0`). Treat the output as sensitive.
 
-Från OTP `crypto`-format:
+From OTP `crypto` format:
 
 ```erlang
 {_PubRsa, PrivRsa} = crypto:generate_key(rsa, {2048, 65537}),
@@ -107,18 +107,18 @@ Från OTP `crypto`-format:
     openpgp_crypto:export_secret({ed25519, {PubEd, PrivEd}}, #{userid => <<"Me <me@example.com>">>, signing_key => PrivEd}).
 ```
 
-Från `public_key`-record-format:
+From `public_key` record formats:
 
 ```erlang
 {ok, ArmoredSec, _Fpr} =
     openpgp_crypto:export_secret_key(RsaPrivRec, #{userid => <<"Me <me@example.com>">>}).
 ```
 
-### Signera och verifiera (detached signatures)
+### Sign and verify (detached signatures)
 
-Detta repo stöder **detached signatures** (OpenPGP Signature packet v4, sigtype `0x00` = “binary document”).
+This repo supports **detached signatures** (OpenPGP v4 Signature packet, sigtype `0x00` = “binary document”).
 
-Skapa en signatur i Erlang och verifiera med `gpg`:
+Create a signature in Erlang and verify with `gpg`:
 
 ```erlang
 Data = <<"The brown fox">>,
@@ -129,7 +129,7 @@ Data = <<"The brown fox">>,
     openpgp_detached_sig:sign(Data, {rsa, PrivRsa}, #{hash => sha512, issuer_fpr => Fpr}).
 ```
 
-Verifiera en `gpg`-skapad detached signatur i Erlang:
+Verify a `gpg`-created detached signature in Erlang:
 
 ```erlang
 ok = openpgp_detached_sig:verify(Data, SigArmoredOrBinary, {rsa, [E, N]}).
@@ -138,7 +138,7 @@ ok = openpgp_detached_sig:verify(Data, SigArmoredOrBinary, {ed25519, Pub32}).
 
 ### Cleartext signatures (clearsign)
 
-Skapa en clearsigned text (`-----BEGIN PGP SIGNED MESSAGE-----`) i Erlang och verifiera med `gpg`:
+Create a clearsigned text (`-----BEGIN PGP SIGNED MESSAGE-----`) in Erlang and verify with `gpg`:
 
 ```erlang
 Text = <<"The brown fox\n">>,
@@ -149,7 +149,7 @@ Text = <<"The brown fox\n">>,
     openpgp_cleartext:sign(Text, {ed25519, PrivEd}, #{hash => sha512, issuer_fpr => Fpr}).
 ```
 
-Verifiera en clearsigned message i Erlang:
+Verify a clearsigned message in Erlang:
 
 ```erlang
 ok = openpgp_cleartext:verify(ClearSignedBin, {ed25519, Pub32}).
