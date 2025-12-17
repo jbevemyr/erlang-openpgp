@@ -11,19 +11,45 @@ gpg_required_test_() ->
         false ->
             {skip, "gpg saknas i PATH"};
         _ ->
-            [
-                {"gpg -> Erlang decode/encode -> gpg import (RSA)", fun rsa_roundtrip/0},
-                {"gpg -> Erlang decode/encode -> gpg import (Ed25519)", fun ed25519_roundtrip/0},
-                {"Erlang -> gpg import (RSA, public+secret)", fun erlang_rsa_to_gpg_import/0},
-                {"Erlang -> gpg import (Ed25519, public+secret)", fun erlang_ed25519_to_gpg_import/0},
-                {"gpg -> crypto-format (RSA/Ed25519)", fun gpg_to_crypto_public/0},
-                {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0}
-                ,{"signera i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0}
-                ,{"signera i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0}
-                ,{"clearsign i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0}
-                ,{"clearsign i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0}
-                ,{"exportera secret key från crypto-format och importera i gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
-            ]
+            case gpg_preflight() of
+                ok ->
+                    [
+                        {"gpg -> Erlang decode/encode -> gpg import (RSA)", fun rsa_roundtrip/0},
+                        {"gpg -> Erlang decode/encode -> gpg import (Ed25519)", fun ed25519_roundtrip/0},
+                        {"Erlang -> gpg import (RSA, public+secret)", fun erlang_rsa_to_gpg_import/0},
+                        {"Erlang -> gpg import (Ed25519, public+secret)", fun erlang_ed25519_to_gpg_import/0},
+                        {"gpg -> crypto-format (RSA/Ed25519)", fun gpg_to_crypto_public/0},
+                        {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0}
+                        ,{"signera i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0}
+                        ,{"signera i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0}
+                        ,{"clearsign i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0}
+                        ,{"clearsign i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0}
+                        ,{"exportera secret key från crypto-format och importera i gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
+                    ];
+                {skip, Reason} ->
+                    {skip, Reason}
+            end
+    end.
+
+gpg_preflight() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+        % This triggers keybox initialization; if CI environment blocks gpg/keyboxd, we skip.
+        case gpg(Home, ["--batch", "--yes", "--list-keys"]) of
+            {ok, _} ->
+                ok;
+            {error, {gpg_failed, Status, Out}} ->
+                {skip, iolist_to_binary([<<"gpg preflight failed (">>, integer_to_binary(Status), <<"): ">>, Out])};
+            {error, timeout} ->
+                {skip, <<"gpg preflight timeout">>};
+            {error, Other} ->
+                {skip, io_lib:format("gpg preflight error: ~p", [Other])}
+        end
+    after
+        Cleanup()
     end.
 
 rsa_roundtrip() ->
@@ -483,6 +509,7 @@ first_fpr_lines([L | Rest]) ->
 
 gpg(Home, Args) ->
     Gpg = os:find_executable("gpg"),
+    Extra = gpg_extra_args(Gpg),
     Port =
         open_port(
             {spawn_executable, Gpg},
@@ -492,10 +519,36 @@ gpg(Home, Args) ->
                 stderr_to_stdout,
                 use_stdio,
                 hide,
-                {args, ["--no-options", "--no-tty", "--homedir", Home | Args]}
+                {args, ["--no-options", "--no-tty"] ++ Extra ++ ["--homedir", Home | Args]}
             ]
         ),
     collect(Port, <<>>).
+
+gpg_extra_args(Gpg) ->
+    % GnuPG 2.3/2.4 can use keyboxd by default; some CI images break it.
+    % Only pass --no-use-keyboxd if the gpg binary supports it.
+    case gpg_supports_flag(Gpg, "--no-use-keyboxd") of
+        true -> ["--no-use-keyboxd"];
+        false -> []
+    end.
+
+gpg_supports_flag(Gpg, Flag) ->
+    Key = {?MODULE, {gpg_flag, Flag}},
+    case persistent_term:get(Key, undefined) of
+        undefined ->
+            Supported =
+                case open_port({spawn_executable, Gpg}, [binary, exit_status, stderr_to_stdout, use_stdio, hide, {args, [Flag, "--version"]}]) of
+                    Port ->
+                        case collect(Port, <<>>) of
+                            {ok, _} -> true;
+                            {error, _} -> false
+                        end
+                end,
+            persistent_term:put(Key, Supported),
+            Supported;
+        V ->
+            V
+    end.
 
 collect(Port, Acc) ->
     receive
