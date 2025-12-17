@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (OTP ${{ matrix.otp }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["26", "27"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM (Erlang/OTP)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+
+      - name: Run tests
+        run: make test
+
+  dialyzer:
+    name: dialyzer (OTP ${{ matrix.otp }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["27"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM (Erlang/OTP)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+
+      - name: Cache Dialyzer PLT
+        uses: actions/cache@v4
+        with:
+          path: .dialyzer_plt
+          key: dialyzer-plt-${{ runner.os }}-otp${{ matrix.otp }}-${{ hashFiles('Makefile', 'src/*.erl') }}
+
+      - name: Run Dialyzer
+        run: make dialyzer
+
+
