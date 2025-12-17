@@ -23,6 +23,31 @@ jobs:
       - name: Run tests
         run: make test
 
+  gpg-integration:
+    name: gpg integration (OTP ${{ matrix.otp }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["27"]
+    env:
+      RUN_GPG_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM (Erlang/OTP)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+
+      - name: Install gpg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gnupg
+
+      - name: Run tests (including gpg integration tests)
+        run: make test
+
   dialyzer:
     name: dialyzer (OTP ${{ matrix.otp }})
     runs-on: ubuntu-latest
