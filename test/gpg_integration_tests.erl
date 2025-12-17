@@ -268,7 +268,9 @@ roundtrip_key(Alg) ->
         Home1 = filename:join(Tmp, "home1"),
         Home2 = filename:join(Tmp, "home2"),
         ok = file:make_dir(Home1),
+        ok = file:change_mode(Home1, 8#700),
         ok = file:make_dir(Home2),
+        ok = file:change_mode(Home2, 8#700),
 
         Email =
             case Alg of
@@ -521,6 +523,7 @@ mktemp_dir() ->
     Name = "gpg_it_" ++ integer_to_list(erlang:unique_integer([positive, monotonic])),
     Dir = filename:join(Base, Name),
     ok = file:make_dir(Dir),
+    ok = file:change_mode(Dir, 8#700),
     Cleanup = fun() -> rm_rf(Dir) end,
     {Dir, Cleanup}.
 
