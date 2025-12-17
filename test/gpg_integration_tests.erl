@@ -9,32 +9,41 @@
 gpg_required_test_() ->
     case os:find_executable("gpg") of
         false ->
-            {skip, "gpg saknas i PATH"};
+            [];
         _ ->
             case should_run_gpg_tests() of
                 {skip, Reason} ->
-                    {skip, Reason};
+                    % EUnit (at least in some OTP versions) doesn't accept {skip,Reason} as a test descriptor.
+                    % Return a single "note" test so the reason is visible in verbose output.
+                    [{"SKIP gpg integration tests: " ++ Reason, fun() -> ok end}];
                 ok ->
                     case gpg_preflight() of
                         ok ->
-                            [
-                                {"gpg -> Erlang decode/encode -> gpg import (RSA)", fun rsa_roundtrip/0},
-                                {"gpg -> Erlang decode/encode -> gpg import (Ed25519)", fun ed25519_roundtrip/0},
-                                {"Erlang -> gpg import (RSA, public+secret)", fun erlang_rsa_to_gpg_import/0},
-                                {"Erlang -> gpg import (Ed25519, public+secret)", fun erlang_ed25519_to_gpg_import/0},
-                                {"gpg -> crypto-format (RSA/Ed25519)", fun gpg_to_crypto_public/0},
-                                {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0}
-                                ,{"signera i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0}
-                                ,{"signera i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0}
-                                ,{"clearsign i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0}
-                                ,{"clearsign i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0}
-                                ,{"exportera secret key från crypto-format och importera i gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
-                            ];
+                            gpg_tests();
                         {skip, Reason} ->
-                            {skip, Reason}
+                            [{"SKIP gpg integration tests (preflight): " ++ skip_reason_to_list(Reason), fun() -> ok end}]
                     end
             end
     end.
+
+skip_reason_to_list(Bin) when is_binary(Bin) -> binary_to_list(Bin);
+skip_reason_to_list(List) when is_list(List) -> List;
+skip_reason_to_list(Other) -> lists:flatten(io_lib:format("~p", [Other])).
+
+gpg_tests() ->
+    [
+        {"gpg -> Erlang decode/encode -> gpg import (RSA)", fun rsa_roundtrip/0},
+        {"gpg -> Erlang decode/encode -> gpg import (Ed25519)", fun ed25519_roundtrip/0},
+        {"Erlang -> gpg import (RSA, public+secret)", fun erlang_rsa_to_gpg_import/0},
+        {"Erlang -> gpg import (Ed25519, public+secret)", fun erlang_ed25519_to_gpg_import/0},
+        {"gpg -> crypto-format (RSA/Ed25519)", fun gpg_to_crypto_public/0},
+        {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0},
+        {"signera i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0},
+        {"signera i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
+        {"clearsign i Erlang och verifiera med gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0},
+        {"clearsign i gpg och verifiera i Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0},
+        {"exportera secret key från crypto-format och importera i gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
+    ].
 
 should_run_gpg_tests() ->
     % Default: run locally. In CI: require explicit opt-in, because many runners
