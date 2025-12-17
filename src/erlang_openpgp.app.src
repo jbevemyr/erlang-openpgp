@@ -1,0 +1,16 @@
+{application, erlang_openpgp, [
+    {description, "Pure Erlang OpenPGP (RFC 4880): keys, packets, armor, sign/verify, OTP crypto/public_key interop"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {modules, []},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        public_key
+    ]},
+    {mod, {erlang_openpgp_app, []}},
+    {env, []}
+]}.
+
+
