@@ -18,6 +18,7 @@
 -export([
     import_public/1,
     import_public_key/1,
+    import_public_bundle/1,
     import_keypair/1,
     export_public/2,
     export_public_with_subkey/3,
@@ -51,6 +52,68 @@
     % Subkey key flags (OpenPGP signature subpacket 27). Usually 1 byte (e.g. 16#02 for signing).
     subkey_flags => binary() | non_neg_integer()
 }.
+
+%% @doc Import an OpenPGP public keyblock that may contain a primary key + subkeys.
+%%
+%% This is a "structural" import: it extracts key material and useful metadata
+%% (fingerprints, created, key flags), but does not currently verify binding signatures.
+%%
+%% Returns:
+%% - primary public key in OTP crypto-format
+%% - primary fingerprint/keyid/created
+%% - all User IDs found (tag 13)
+%% - subkeys (tag 14) with fingerprint/created/flags (if present)
+-spec import_public_bundle(iodata() | binary()) ->
+    {ok,
+        #{
+            primary := crypto_pub(),
+            primary_fpr := binary(),
+            primary_keyid := binary(),
+            primary_created := non_neg_integer(),
+            userids := [binary()],
+            subkeys := [
+                #{
+                    pub := crypto_pub(),
+                    fpr := binary(),
+                    keyid := binary(),
+                    created := non_neg_integer(),
+                    flags => non_neg_integer() | undefined
+                }
+            ]
+        }}
+    | {error, term()}.
+import_public_bundle(Input) ->
+    case gpg_keys:decode(Input) of
+        {ok, #{packets := Packets}} ->
+            case find_packet(6, Packets) of
+                {ok, PrimaryBody} ->
+                    case public_key_body_info(PrimaryBody) of
+                        {ok, #{created := PrimaryCreated, fingerprint := PrimaryFpr, keyid := PrimaryKeyId}} ->
+                            case parse_public_key_body(PrimaryBody) of
+                                {ok, PrimaryPub} ->
+                                    UserIds = [maps:get(body, P) || P <- Packets, maps:get(tag, P) =:= 13],
+                                    SubInfos = parse_subkeys(Packets),
+                                    {ok,
+                                        #{
+                                            primary => PrimaryPub,
+                                            primary_fpr => PrimaryFpr,
+                                            primary_keyid => PrimaryKeyId,
+                                            primary_created => PrimaryCreated,
+                                            userids => UserIds,
+                                            subkeys => SubInfos
+                                        }};
+                                {error, _} = Err1 ->
+                                    Err1
+                            end;
+                        {error, _} = Err2 ->
+                            Err2
+                    end;
+                error ->
+                    {error, no_public_key_packet}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
 
 %% @doc Extract metadata from a public OpenPGP key block (or raw packet bytes).
 %%
@@ -485,6 +548,71 @@ parse_public_key_body(<<4:8, _Created:32/big-unsigned, 22:8, OidLen:8, Oid:OidLe
     end;
 parse_public_key_body(_Other) ->
     {error, unsupported_public_key_format}.
+
+parse_subkeys(Packets) ->
+    parse_subkeys(Packets, []).
+
+parse_subkeys([], Acc) ->
+    lists:reverse(Acc);
+parse_subkeys([#{tag := 14, body := SubBody} | Rest], Acc) ->
+    % Try to find an immediate following subkey binding signature (0x18)
+    {Flags, Rest2} =
+        case Rest of
+            [#{tag := 2, body := SigBody} | Tail] ->
+                case parse_v4_sig_info(SigBody) of
+                    {ok, #{sig_type := 16#18, hashed_sub := HashedSub}} ->
+                        {subkey_flags_from_subpackets(HashedSub), Tail};
+                    _ ->
+                        {undefined, Rest}
+                end;
+            _ ->
+                {undefined, Rest}
+        end,
+    case public_key_body_info(SubBody) of
+        {ok, #{created := Created, fingerprint := Fpr, keyid := KeyId}} ->
+            case parse_public_key_body(SubBody) of
+                {ok, Pub} ->
+                    parse_subkeys(Rest2, [#{pub => Pub, fpr => Fpr, keyid => KeyId, created => Created, flags => Flags} | Acc]);
+                _ ->
+                    parse_subkeys(Rest2, Acc)
+            end;
+        _ ->
+            parse_subkeys(Rest2, Acc)
+    end;
+parse_subkeys([_Other | Rest], Acc) ->
+    parse_subkeys(Rest, Acc).
+
+parse_v4_sig_info(
+    <<4:8, SigType:8, PkAlgId:8, HashAlgId:8, HashedLen:16/big-unsigned, Hashed:HashedLen/binary,
+      UnhashedLen:16/big-unsigned, Unhashed:UnhashedLen/binary, _Hash16:2/binary, _Rest/binary>>
+) ->
+    {ok, #{sig_type => SigType, pk_alg => PkAlgId, hash_alg => HashAlgId, hashed_sub => Hashed, unhashed_sub => Unhashed}};
+parse_v4_sig_info(_Other) ->
+    {error, bad_signature_packet}.
+
+subkey_flags_from_subpackets(Subpackets) when is_binary(Subpackets) ->
+    case find_sig_subpacket(27, Subpackets) of
+        {ok, <<Flags:8, _/binary>>} -> Flags;
+        {ok, <<>>} -> undefined;
+        error -> undefined
+    end.
+
+find_sig_subpacket(Type, Bin) when is_integer(Type), is_binary(Bin) ->
+    find_sig_subpacket(Type, Bin, error).
+
+find_sig_subpacket(_Type, <<>>, Default) ->
+    Default;
+find_sig_subpacket(Type, <<Len:8, T:8, Rest/binary>>, Default) when Len >= 1 ->
+    DataLen = Len - 1,
+    case Rest of
+        <<Data:DataLen/binary, Tail/binary>> ->
+            case T =:= Type of
+                true -> {ok, Data};
+                false -> find_sig_subpacket(Type, Tail, Default)
+            end;
+        _ ->
+            Default
+    end.
 
 %% Internal: build a v4 Public-Key packet body from OTP crypto pubkey formats.
 pubkey_body({rsa, [E, N]}, Created) when is_binary(E), is_binary(N), is_integer(Created), Created >= 0 ->

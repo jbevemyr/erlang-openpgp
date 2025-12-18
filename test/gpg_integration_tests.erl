@@ -40,6 +40,7 @@ gpg_tests() ->
         {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0},
         {"sign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0},
         {"sign in Erlang with subkey and verify with gpg (Ed25519 primary + Ed25519 subkey)", fun erlang_sign_subkey_gpg_verify/0},
+        {"import primary+subkey bundle and verify subkey signature in Erlang", fun import_bundle_verify_subkey_sig/0},
         {"sign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
         {"clearsign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0},
         {"clearsign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0},
@@ -227,6 +228,35 @@ erlang_sign_subkey_gpg_verify() ->
     after
         Cleanup()
     end.
+
+import_bundle_verify_subkey_sig() ->
+    % Build a primary+subkey keyblock, import it structurally, then verify a signature made with the subkey.
+    Data = <<"The brown fox">>,
+    {PrimaryPub, PrimaryPriv} = crypto:generate_key(eddsa, ed25519),
+    {SubPub, SubPriv} = crypto:generate_key(eddsa, ed25519),
+
+    Created = 1700000000,
+    {ok, PubKeyBlock, #{subkey_fpr := SubFpr}} =
+        openpgp_crypto:export_public_with_subkey(
+            {ed25519, PrimaryPub},
+            {ed25519, SubPub},
+            #{
+                userid => <<"Bundle <bundle@example.com>">>,
+                created => Created,
+                subkey_created => Created + 1,
+                signing_key => PrimaryPriv,
+                subkey_signing_key => SubPriv,
+                subkey_flags => 16#02
+            }
+        ),
+
+    {ok, Bundle} = openpgp_crypto:import_public_bundle(PubKeyBlock),
+    Subkeys = maps:get(subkeys, Bundle),
+    % Find the subkey by fingerprint:
+    [#{pub := {ed25519, SubPub32}}] = [S || S <- Subkeys, maps:get(fpr, S) =:= SubFpr],
+
+    {ok, Sig} = openpgp_detached_sig:sign(Data, {ed25519, SubPriv}, #{hash => sha512, issuer_fpr => SubFpr}),
+    ok = openpgp_detached_sig:verify(Data, Sig, {ed25519, SubPub32}).
 
 gpg_sign_erlang_verify() ->
     {Tmp, Cleanup} = mktemp_dir(),

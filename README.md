@@ -96,6 +96,15 @@ Data = <<"The brown fox">>,
 {ok, SigArmored} = openpgp_detached_sig:sign(Data, {ed25519, SubPriv}, #{hash => sha512, issuer_fpr => SubFpr}).
 ```
 
+Import such a keyblock and extract the subkey public key for verification:
+
+```erlang
+{ok, Bundle} = openpgp_crypto:import_public_bundle(PubKeyBlock),
+Subkeys = maps:get(subkeys, Bundle),
+[#{pub := {ed25519, SubPub32}}] = [S || S <- Subkeys, maps:get(fpr, S) =:= SubFpr],
+ok = openpgp_detached_sig:verify(Data, SigArmored, {ed25519, SubPub32}).
+```
+
 ### Export from `public_key` record formats
 
 If you have keys as ASN.1 records (e.g. `#'RSAPublicKey'{...}` or Ed25519 from `public_key:generate_key/1`),
