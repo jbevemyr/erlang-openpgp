@@ -88,7 +88,7 @@ Data = <<"The brown fox">>,
             userid => <<"Me <me@example.com>">>,
             signing_key => PrimaryPriv,
             subkey_signing_key => SubPriv,
-            subkey_flags => 16#02 % signing
+            subkey_flags => [sign] % or 16#02
         }
     ),
 

@@ -217,7 +217,7 @@ erlang_sign_subkey_gpg_verify() ->
                     signing_key => PrimaryPriv,
                     subkey_signing_key => SubPriv,
                     % "This key may be used to sign data"
-                    subkey_flags => 16#02
+                    subkey_flags => [sign]
                 }
             ),
         ok = gpg_import_public(Home, PubArmored),

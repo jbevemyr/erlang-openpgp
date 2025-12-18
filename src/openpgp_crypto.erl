@@ -50,7 +50,7 @@
     subkey_binding_created => non_neg_integer(),
     subkey_signing_key => term(),
     % Subkey key flags (OpenPGP signature subpacket 27). Usually 1 byte (e.g. 16#02 for signing).
-    subkey_flags => binary() | non_neg_integer()
+    subkey_flags => binary() | non_neg_integer() | [atom()]
 }.
 
 %% @doc Import an OpenPGP public keyblock that may contain a primary key + subkeys.
@@ -702,8 +702,27 @@ subkey_flags_int(I) when is_integer(I), I >= 0, I =< 255 ->
 subkey_flags_int(Bin) when is_binary(Bin), byte_size(Bin) >= 1 ->
     <<I:8, _/binary>> = Bin,
     I;
+subkey_flags_int(Atoms) when is_list(Atoms) ->
+    lists:foldl(fun subkey_flag_atom_bit/2, 0, Atoms);
 subkey_flags_int(Other) ->
     error({bad_subkey_flags, Other}).
+
+subkey_flag_atom_bit(certify, Acc) ->
+    Acc bor 16#01;
+subkey_flag_atom_bit(sign, Acc) ->
+    Acc bor 16#02;
+subkey_flag_atom_bit(encrypt_communication, Acc) ->
+    Acc bor 16#04;
+subkey_flag_atom_bit(encrypt_storage, Acc) ->
+    Acc bor 16#08;
+subkey_flag_atom_bit(split, Acc) ->
+    Acc bor 16#10;
+subkey_flag_atom_bit(authentication, Acc) ->
+    Acc bor 16#20;
+subkey_flag_atom_bit(auth, Acc) ->
+    Acc bor 16#20;
+subkey_flag_atom_bit(Other, _Acc) ->
+    error({bad_subkey_flag_atom, Other}).
 
 public_key_body_info(<<4:8, Created:32/big-unsigned, AlgId:8, _/binary>> = Body) ->
     Alg =
