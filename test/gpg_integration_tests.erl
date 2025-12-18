@@ -41,6 +41,7 @@ gpg_tests() ->
         {"sign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0},
         {"sign in Erlang with subkey and verify with gpg (Ed25519 primary + Ed25519 subkey)", fun erlang_sign_subkey_gpg_verify/0},
         {"import primary+subkey bundle and verify subkey signature in Erlang", fun import_bundle_verify_subkey_sig/0},
+        {"gpg generates key+signing-subkey, signs, export public, import in Erlang, verify with subkey", fun gpg_signing_subkey_erlang_verify/0},
         {"sign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
         {"clearsign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0},
         {"clearsign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0},
@@ -257,6 +258,53 @@ import_bundle_verify_subkey_sig() ->
 
     {ok, Sig} = openpgp_detached_sig:sign(Data, {ed25519, SubPriv}, #{hash => sha512, issuer_fpr => SubFpr}),
     ok = openpgp_detached_sig:verify(Data, Sig, {ed25519, SubPub32}).
+
+gpg_signing_subkey_erlang_verify() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+
+        Data = <<"The brown fox">>,
+        DataPath = filename:join(Tmp, "msg.txt"),
+        ok = file:write_file(DataPath, Data),
+
+        % RSA: create primary cert-only + signing subkey, sign as subkey, verify in Erlang using imported subkey pub.
+        EmailRsa = "gpgsub-rsa@example.com",
+        ok = gen_key_signing_subkey(Home, rsa, EmailRsa),
+        {ok, PubRsaArmored} = gpg_export_public(Home, EmailRsa),
+        {ok, BundleRsa} = openpgp_crypto:import_public_bundle(PubRsaArmored),
+        SubKeyIdRsa = binary_to_list(gpg_first_secret_subkey_keyid(Home, EmailRsa)),
+        SigRsaPath = filename:join(Tmp, "gpg-sub-rsa.sig"),
+        ok = gpg_sign_detached(Home, SubKeyIdRsa, DataPath, SigRsaPath),
+        {ok, SigRsa} = file:read_file(SigRsaPath),
+        PrimaryRsa = maps:get(primary, BundleRsa),
+        % Primary should NOT verify (we signed with the subkey)
+        ?assertMatch({error, _}, openpgp_detached_sig:verify(Data, SigRsa, PrimaryRsa)),
+        {ok, SubPubRsa} = pick_signing_subkey_pub(BundleRsa),
+        ok = openpgp_detached_sig:verify(Data, SigRsa, SubPubRsa),
+
+        % Ed25519: same flow (skip if environment can't generate Ed25519 subkeys in batch).
+        EmailEd = "gpgsub-ed@example.com",
+        case gen_key_signing_subkey(Home, ed25519, EmailEd) of
+            ok ->
+                {ok, PubEdArmored} = gpg_export_public(Home, EmailEd),
+                {ok, BundleEd} = openpgp_crypto:import_public_bundle(PubEdArmored),
+                SubKeyIdEd = binary_to_list(gpg_first_secret_subkey_keyid(Home, EmailEd)),
+                SigEdPath = filename:join(Tmp, "gpg-sub-ed.sig"),
+                ok = gpg_sign_detached(Home, SubKeyIdEd, DataPath, SigEdPath),
+                {ok, SigEd} = file:read_file(SigEdPath),
+                PrimaryEd = maps:get(primary, BundleEd),
+                ?assertMatch({error, _}, openpgp_detached_sig:verify(Data, SigEd, PrimaryEd)),
+                {ok, SubPubEd} = pick_signing_subkey_pub(BundleEd),
+                ok = openpgp_detached_sig:verify(Data, SigEd, SubPubEd);
+            {skip, _Reason} ->
+                ok
+        end
+    after
+        Cleanup()
+    end.
 
 gpg_sign_erlang_verify() ->
     {Tmp, Cleanup} = mktemp_dir(),
@@ -490,6 +538,49 @@ gen_key(Home, ed25519, Email) ->
             end
     end.
 
+gen_key_signing_subkey(Home, rsa, Email) ->
+    % Primary: cert-only. Subkey: signing.
+    Batch = iolist_to_binary([
+        "%no-protection\n",
+        "Key-Type: RSA\n",
+        "Key-Length: 2048\n",
+        "Key-Usage: cert\n",
+        "Subkey-Type: RSA\n",
+        "Subkey-Length: 2048\n",
+        "Subkey-Usage: sign\n",
+        "Name-Real: Test RSA Subkey\n",
+        "Name-Email: ", Email, "\n",
+        "Expire-Date: 0\n",
+        "%commit\n"
+    ]),
+    gpg_genkey_batch(Home, Batch);
+gen_key_signing_subkey(Home, ed25519, Email) ->
+    % Primary: cert-only. Subkey: signing (Ed25519). May not be supported on older GnuPG.
+    Batch = iolist_to_binary([
+        "%no-protection\n",
+        "Key-Type: eddsa\n",
+        "Key-Curve: ed25519\n",
+        "Key-Usage: cert\n",
+        "Subkey-Type: eddsa\n",
+        "Subkey-Curve: ed25519\n",
+        "Subkey-Usage: sign\n",
+        "Name-Real: Test Ed25519 Subkey\n",
+        "Name-Email: ", Email, "\n",
+        "Expire-Date: 0\n",
+        "%commit\n"
+    ]),
+    case gpg_genkey_batch(Home, Batch) of
+        ok ->
+            ok;
+        {error, {gpg_failed, _Status, Out}} ->
+            case binary:match(Out, <<"ed25519">>) of
+                nomatch -> error({gpg_failed, Out});
+                _ -> {skip, "GnuPG does not appear to support Ed25519 subkey generation in batch mode in this environment"}
+            end;
+        {skip, _} = Skip ->
+            Skip
+    end.
+
 gpg_genkey_batch(Home, BatchFileContent) ->
     {Tmp, Cleanup} = mktemp_dir(),
     try
@@ -540,6 +631,48 @@ gpg_sign_detached(Home, Email, DataPath, SigPath) ->
     case gpg(Home, ["--batch", "--yes", "--local-user", Email, "--armor", "--detach-sign", "--output", SigPath, DataPath]) of
         {ok, _} -> ok;
         {error, _} = Err -> error(Err)
+    end.
+
+gpg_first_secret_subkey_keyid(Home, Email) ->
+    case gpg(Home, ["--batch", "--yes", "--with-colons", "--list-secret-keys", Email]) of
+        {ok, Out} ->
+            case first_keyid_by_prefix(Out, <<"ssb">>) of
+                {ok, KeyId} -> KeyId;
+                error -> error({no_secret_subkey, Out})
+            end;
+        {error, _} = Err ->
+            error(Err)
+    end.
+
+first_keyid_by_prefix(Out, Prefix) when is_binary(Out), is_binary(Prefix) ->
+    Lines = binary:split(Out, <<"\n">>, [global]),
+    first_keyid_by_prefix_lines(Lines, Prefix).
+
+first_keyid_by_prefix_lines([], _Prefix) ->
+    error;
+first_keyid_by_prefix_lines([L | Rest], Prefix) ->
+    case binary:split(L, <<":">>, [global]) of
+        [P | Fields] when P =:= Prefix ->
+            % pub/sec/sub/ssb line: field 5 is keyid (1-based), i.e. 4th element in Fields
+            case length(Fields) >= 4 of
+                true -> {ok, lists:nth(4, Fields)};
+                false -> first_keyid_by_prefix_lines(Rest, Prefix)
+            end;
+        _ ->
+            first_keyid_by_prefix_lines(Rest, Prefix)
+    end.
+
+pick_signing_subkey_pub(Bundle) ->
+    Subkeys = maps:get(subkeys, Bundle, []),
+    Signing =
+        [maps:get(pub, S) || S <- Subkeys, (maps:get(flags, S, 0) band 16#02) =:= 16#02],
+    case Signing of
+        [Pub | _] -> {ok, Pub};
+        [] ->
+            case Subkeys of
+                [S0 | _] -> {ok, maps:get(pub, S0)};
+                [] -> {error, no_subkeys}
+            end
     end.
 
 gpg_verify_detached(Home, SigPath, DataPath) ->
