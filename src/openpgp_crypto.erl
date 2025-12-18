@@ -20,6 +20,7 @@
     import_public_key/1,
     import_keypair/1,
     export_public/2,
+    export_public_with_subkey/3,
     export_public_key/2,
     export_secret/2,
     export_secret_key/2,
@@ -41,7 +42,14 @@
     userid := iodata() | binary(),
     created => non_neg_integer(),
     % Optional: if present we add a self-cert signature.
-    signing_key => rsa_priv() | ed_priv()
+    signing_key => rsa_priv() | ed_priv(),
+    % Optional: attach one signing subkey (export as tag 14) with a 0x18 binding signature.
+    subkey => term(),
+    subkey_created => non_neg_integer(),
+    subkey_binding_created => non_neg_integer(),
+    subkey_signing_key => term(),
+    % Subkey key flags (OpenPGP signature subpacket 27). Usually 1 byte (e.g. 16#02 for signing).
+    subkey_flags => binary() | non_neg_integer()
 }.
 
 %% @doc Extract metadata from a public OpenPGP key block (or raw packet bytes).
@@ -258,6 +266,83 @@ export_public({ed25519, Pub32}, Opts) when is_binary(Pub32), byte_size(Pub32) =:
 export_public(Other, _Opts) ->
     {error, {unsupported_key, Other}}.
 
+%% @doc Export a public OpenPGP key block containing a primary key + one subkey.
+%%
+%% `PrimaryAny` and `SubkeyAny` may be any of the formats supported by `export_public_key/2`,
+%% as well as OTP crypto formats:
+%% - primary pub: `{rsa,[E,N]}` or `{ed25519,Pub32}`
+%% - primary signing key: `Opts#{signing_key => Priv}` must be present or derivable from PrimaryAny
+%%
+%% This returns `{ok, Armored, #{primary_fpr := Fpr20, subkey_fpr := Fpr20}}`.
+-spec export_public_with_subkey(term(), term(), export_opts()) ->
+    {ok, binary(), #{primary_fpr := binary(), subkey_fpr := binary()}} | {error, term()}.
+export_public_with_subkey(PrimaryAny, SubkeyAny, Opts0) ->
+    UserId = iolist_to_binary(maps:get(userid, Opts0)),
+    CreatedPrimary = maps:get(created, Opts0, erlang:system_time(second)),
+    CreatedSub = maps:get(subkey_created, Opts0, CreatedPrimary),
+
+    case {to_crypto_pub(PrimaryAny), to_crypto_pub(SubkeyAny)} of
+        {{ok, PrimaryPub}, {ok, SubPub}} ->
+            case to_primary_signing_key(PrimaryAny, Opts0) of
+                {ok, {PrimaryAlg, PrimaryPrivForSig}} ->
+                    PrimaryPubBody = pubkey_body(PrimaryPub, CreatedPrimary),
+                    SubPubBody = pubkey_body(SubPub, CreatedSub),
+
+                    PrimaryPkt = #{tag => 6, format => new, body => PrimaryPubBody},
+                    UidPkt = #{tag => 13, format => new, body => UserId},
+                    #{packet := SelfSigPkt} = openpgp_sig:self_cert(PrimaryAlg, #{priv => PrimaryPrivForSig}, PrimaryPubBody, UserId),
+
+                    SubPkt = #{tag => 14, format => new, body => SubPubBody},
+                    SubkeyFlagsInt = subkey_flags_int(maps:get(subkey_flags, Opts0, 16#02)),
+                    EmbeddedSigBody =
+                        case (SubkeyFlagsInt band 16#02) =:= 16#02 of
+                            false ->
+                                undefined;
+                            true ->
+                                case to_subkey_signing_key(SubkeyAny, Opts0) of
+                                    {ok, {SubAlg, SubPrivForSig}} ->
+                                        #{packet := BackSigPkt} =
+                                            openpgp_sig:primary_key_binding(
+                                                SubAlg,
+                                                #{priv => SubPrivForSig},
+                                                PrimaryPubBody,
+                                                SubPubBody
+                                            ),
+                                        maps:get(body, BackSigPkt);
+                                    {error, _} = Err2 ->
+                                        return_error({missing_subkey_signing_key, Err2})
+                                end
+                        end,
+                    case EmbeddedSigBody of
+                        {error, _} = Err3 ->
+                            Err3;
+                        _ ->
+                            #{packet := BindSigPkt} =
+                                openpgp_sig:subkey_binding(
+                                    PrimaryAlg,
+                                    #{priv => PrimaryPrivForSig},
+                                    PrimaryPubBody,
+                                    SubPubBody,
+                                    #{
+                                        created => maps:get(subkey_binding_created, Opts0, CreatedPrimary),
+                                        subkey_flags => SubkeyFlagsInt,
+                                        embedded_sig_body => EmbeddedSigBody
+                                    }
+                                ),
+                            PrimaryFpr = openpgp_fingerprint:v4_fingerprint(PrimaryPubBody),
+                            SubFpr = openpgp_fingerprint:v4_fingerprint(SubPubBody),
+                            Packets = [PrimaryPkt, UidPkt, SelfSigPkt, SubPkt, BindSigPkt],
+                            {ok, gpg_keys:encode_public(Packets), #{primary_fpr => PrimaryFpr, subkey_fpr => SubFpr}}
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {{error, _} = Err, _} ->
+            Err;
+        {_, {error, _} = Err} ->
+            Err
+    end.
+
 %% @doc Export a public OpenPGP key block from common `public_key` record formats.
 %%
 %% Supported inputs:
@@ -400,6 +485,97 @@ parse_public_key_body(<<4:8, _Created:32/big-unsigned, 22:8, OidLen:8, Oid:OidLe
     end;
 parse_public_key_body(_Other) ->
     {error, unsupported_public_key_format}.
+
+%% Internal: build a v4 Public-Key packet body from OTP crypto pubkey formats.
+pubkey_body({rsa, [E, N]}, Created) when is_binary(E), is_binary(N), is_integer(Created), Created >= 0 ->
+    iolist_to_binary([<<4:8, Created:32/big-unsigned, 1:8>>, openpgp_mpi:encode_bin(N), openpgp_mpi:encode_bin(E)]);
+pubkey_body({ed25519, Pub32}, Created) when is_binary(Pub32), byte_size(Pub32) =:= 32, is_integer(Created), Created >= 0 ->
+    Oid = ed25519_oid(),
+    PubOpaque = <<16#40, Pub32/binary>>,
+    iolist_to_binary([
+        <<4:8, Created:32/big-unsigned, 22:8>>,
+        <<(byte_size(Oid)):8, Oid/binary>>,
+        openpgp_mpi:encode_bin(PubOpaque)
+    ]).
+
+to_crypto_pub({rsa, [E, N]} = Pub) when is_binary(E), is_binary(N) ->
+    {ok, Pub};
+to_crypto_pub({ed25519, Pub32} = Pub) when is_binary(Pub32), byte_size(Pub32) =:= 32 ->
+    {ok, Pub};
+to_crypto_pub(#'RSAPublicKey'{modulus = N, publicExponent = E}) ->
+    {ok, {rsa, [bin_u(E), bin_u(N)]}};
+to_crypto_pub(#'RSAPrivateKey'{} = R) ->
+    {ok, {rsa, [bin_u(R#'RSAPrivateKey'.publicExponent), bin_u(R#'RSAPrivateKey'.modulus)]}};
+to_crypto_pub({#'ECPoint'{point = Pub0}, {namedCurve, Oid}}) ->
+    case is_ed25519_curve(Oid) of
+        true -> {ok, {ed25519, ed25519_pub32(Pub0)}};
+        false -> {error, {unsupported_curve, Oid}}
+    end;
+to_crypto_pub(#'ECPrivateKey'{publicKey = #'ECPoint'{point = Pub0}, parameters = {namedCurve, Oid}}) ->
+    case is_ed25519_curve(Oid) of
+        true -> {ok, {ed25519, ed25519_pub32(Pub0)}};
+        false -> {error, {unsupported_curve, Oid}}
+    end;
+to_crypto_pub({'ECPrivateKey', _Ver, _PrivField, {namedCurve, Oid}, PubField}) ->
+    to_crypto_pub({#'ECPoint'{point = PubField}, {namedCurve, Oid}});
+to_crypto_pub({'ECPrivateKey', _Ver, _PrivField, {namedCurve, Oid}, PubField, _Attrs}) ->
+    to_crypto_pub({#'ECPoint'{point = PubField}, {namedCurve, Oid}});
+to_crypto_pub(Other) ->
+    {error, {unsupported_public_key, Other}}.
+
+to_primary_signing_key(PrimaryAny, Opts) when is_map(Opts) ->
+    case maps:find(signing_key, Opts) of
+        {ok, Priv} ->
+            to_primary_signing_key_from_priv(Priv);
+        error ->
+            % Try to derive from the primary key input itself (if it includes private material).
+            to_primary_signing_key_from_priv(PrimaryAny)
+    end.
+
+to_primary_signing_key_from_priv(Priv) when is_list(Priv) ->
+    % RSA crypto private key list
+    {ok, {rsa, Priv}};
+to_primary_signing_key_from_priv(Priv32) when is_binary(Priv32), byte_size(Priv32) =:= 32 ->
+    % Ed25519 private key
+    {ok, {ed25519, Priv32}};
+to_primary_signing_key_from_priv(#'RSAPrivateKey'{} = R) ->
+    case rsa_priv_record_to_crypto(R) of
+        {ok, PrivCrypto} -> {ok, {rsa, PrivCrypto}};
+        {error, _} = Err -> Err
+    end;
+% Handle both public_key record form and raw tuple variants for Ed25519 ECPrivateKey.
+% (Records are tuples under the hood, so we prefer tuple matching here.)
+to_primary_signing_key_from_priv({'ECPrivateKey', _Ver, PrivField, {namedCurve, Oid}, PubField} = _T) ->
+    case is_ed25519_curve(Oid) of
+        false -> {error, {unsupported_curve, Oid}};
+        true ->
+            case ed25519_from_ecprivate_tuple_fields(PrivField, PubField) of
+                {ok, {_Pub32, Priv32}} when is_binary(Priv32), byte_size(Priv32) =:= 32 ->
+                    {ok, {ed25519, Priv32}};
+                {error, _} = Err ->
+                    Err
+            end
+    end;
+to_primary_signing_key_from_priv({'ECPrivateKey', _Ver, PrivField, {namedCurve, Oid}, PubField, _Attrs} = _T) ->
+    to_primary_signing_key_from_priv({'ECPrivateKey', 1, PrivField, {namedCurve, Oid}, PubField});
+to_primary_signing_key_from_priv(Other) ->
+    {error, {bad_signing_key, Other}}.
+
+to_subkey_signing_key(SubkeyAny, Opts) when is_map(Opts) ->
+    case maps:find(subkey_signing_key, Opts) of
+        {ok, Priv} ->
+            to_primary_signing_key_from_priv(Priv);
+        error ->
+            to_primary_signing_key_from_priv(SubkeyAny)
+    end.
+
+subkey_flags_int(I) when is_integer(I), I >= 0, I =< 255 ->
+    I;
+subkey_flags_int(Bin) when is_binary(Bin), byte_size(Bin) >= 1 ->
+    <<I:8, _/binary>> = Bin,
+    I;
+subkey_flags_int(Other) ->
+    error({bad_subkey_flags, Other}).
 
 public_key_body_info(<<4:8, Created:32/big-unsigned, AlgId:8, _/binary>> = Body) ->
     Alg =

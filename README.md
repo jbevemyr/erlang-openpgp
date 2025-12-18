@@ -64,6 +64,38 @@ Export a public key from crypto format to OpenPGP (GPG format). For best compati
     }).
 ```
 
+### Primary + subkey (export a keyblock suitable for verifying subkey signatures in `gpg`)
+
+If you want to verify signatures made with a **signing subkey** in `gpg`, you typically need a keyblock that contains:
+
+- a **primary key** (tag 6) + User ID + self-cert
+- a **public subkey** (tag 14)
+- a **subkey binding signature** (0x18) that includes an embedded **primary key binding signature** (0x19, “cross-cert”)
+
+This repo provides a helper that exports such a keyblock:
+
+```erlang
+Data = <<"The brown fox">>,
+
+{PrimaryPub, PrimaryPriv} = crypto:generate_key(eddsa, ed25519),
+{SubPub, SubPriv} = crypto:generate_key(eddsa, ed25519),
+
+{ok, PubKeyBlock, #{primary_fpr := _PrimaryFpr, subkey_fpr := SubFpr}} =
+    openpgp_crypto:export_public_with_subkey(
+        {ed25519, PrimaryPub},
+        {ed25519, SubPub},
+        #{
+            userid => <<"Me <me@example.com>">>,
+            signing_key => PrimaryPriv,
+            subkey_signing_key => SubPriv,
+            subkey_flags => 16#02 % signing
+        }
+    ),
+
+% Sign using the subkey (no special signing API is needed):
+{ok, SigArmored} = openpgp_detached_sig:sign(Data, {ed25519, SubPriv}, #{hash => sha512, issuer_fpr => SubFpr}).
+```
+
 ### Export from `public_key` record formats
 
 If you have keys as ASN.1 records (e.g. `#'RSAPublicKey'{...}` or Ed25519 from `public_key:generate_key/1`),

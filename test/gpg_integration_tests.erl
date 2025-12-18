@@ -39,6 +39,7 @@ gpg_tests() ->
         {"gpg -> crypto-format (RSA/Ed25519)", fun gpg_to_crypto_public/0},
         {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0},
         {"sign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0},
+        {"sign in Erlang with subkey and verify with gpg (Ed25519 primary + Ed25519 subkey)", fun erlang_sign_subkey_gpg_verify/0},
         {"sign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
         {"clearsign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0},
         {"clearsign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0},
@@ -183,6 +184,46 @@ erlang_sign_gpg_verify() ->
         SigEdPath = filename:join(Tmp, "sig-ed.asc"),
         ok = file:write_file(SigEdPath, SigEd),
         ok = gpg_verify_detached(Home, SigEdPath, DataPath)
+    after
+        Cleanup()
+    end.
+
+erlang_sign_subkey_gpg_verify() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+
+        Data = <<"The brown fox">>,
+        DataPath = filename:join(Tmp, "msg.txt"),
+        ok = file:write_file(DataPath, Data),
+
+        {PrimaryPub, PrimaryPriv} = crypto:generate_key(eddsa, ed25519),
+        {SubPub, SubPriv} = crypto:generate_key(eddsa, ed25519),
+
+        % Use deterministic timestamps so fingerprints are stable.
+        Created = 1700000000,
+        {ok, PubArmored, #{primary_fpr := _PrimaryFpr, subkey_fpr := SubFpr}} =
+            openpgp_crypto:export_public_with_subkey(
+                {ed25519, PrimaryPub},
+                {ed25519, SubPub},
+                #{
+                    userid => <<"Signer (subkey) <signer-subkey@example.com>">>,
+                    created => Created,
+                    subkey_created => Created + 1,
+                    signing_key => PrimaryPriv,
+                    subkey_signing_key => SubPriv,
+                    % "This key may be used to sign data"
+                    subkey_flags => 16#02
+                }
+            ),
+        ok = gpg_import_public(Home, PubArmored),
+
+        {ok, Sig} = openpgp_detached_sig:sign(Data, {ed25519, SubPriv}, #{hash => sha512, issuer_fpr => SubFpr}),
+        SigPath = filename:join(Tmp, "sig-subkey.asc"),
+        ok = file:write_file(SigPath, Sig),
+        ok = gpg_verify_detached(Home, SigPath, DataPath)
     after
         Cleanup()
     end.
