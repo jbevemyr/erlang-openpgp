@@ -75,4 +75,11 @@ import_public_bundle_key_formats_test() ->
     Subkeys = maps:get(subkeys, Bundle),
     [#{pub := {#'ECPoint'{}, {namedCurve, _}}}] = [S || S <- Subkeys, maps:get(fpr, S) =:= SubFpr].
 
+subkey_flags_to_atoms_test() ->
+    ?assertEqual([], openpgp_crypto:subkey_flags_to_atoms(undefined)),
+    ?assertEqual([], openpgp_crypto:subkey_flags_to_atoms(0)),
+    ?assertEqual([sign], openpgp_crypto:subkey_flags_to_atoms(16#02)),
+    ?assertEqual([encrypt_communication, encrypt_storage], openpgp_crypto:subkey_flags_to_atoms(16#0C)),
+    ?assertEqual([sign, auth], openpgp_crypto:subkey_flags_to_atoms(16#22)).
+
 

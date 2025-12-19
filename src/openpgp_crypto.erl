@@ -21,6 +21,7 @@
     import_public_bundle/1,
     import_public_bundle_key/1,
     crypto_pub_to_public_key/1,
+    subkey_flags_to_atoms/1,
     import_keypair/1,
     export_public/2,
     export_public_with_subkey/3,
@@ -57,6 +58,32 @@ crypto_pub_to_public_key({ed25519, Pub32}) when is_binary(Pub32), byte_size(Pub3
     {ok, {#'ECPoint'{point = Pub32}, Params}};
 crypto_pub_to_public_key(Other) ->
     {error, {unsupported_crypto_public_key, Other}}.
+
+%% @doc Convert a subkey flags bitmask (as returned by `import_public_bundle/1`) to a list of atoms.
+%%
+%% Input:
+%% - `undefined` -> `[]`
+%% - integer 0..255 -> list of atoms like `[sign, encrypt_communication]`
+%%
+%% Note: Order is stable and does not imply preference.
+-spec subkey_flags_to_atoms(non_neg_integer() | undefined) -> [atom()].
+subkey_flags_to_atoms(undefined) ->
+    [];
+subkey_flags_to_atoms(I) when is_integer(I), I >= 0 ->
+    lists:append([
+        maybe_flag(I, 16#01, certify),
+        maybe_flag(I, 16#02, sign),
+        maybe_flag(I, 16#04, encrypt_communication),
+        maybe_flag(I, 16#08, encrypt_storage),
+        maybe_flag(I, 16#10, split),
+        maybe_flag(I, 16#20, auth)
+    ]).
+
+maybe_flag(I, Mask, Atom) ->
+    case (I band Mask) =:= Mask of
+        true -> [Atom];
+        false -> []
+    end.
 
 -type export_opts() :: #{
     userid := iodata() | binary(),
