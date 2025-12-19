@@ -222,9 +222,19 @@ primary_key_binding(SubkeyAlg, Key, PrimaryPubBody, SubkeyPubBody) ->
 %% Internal
 
 subpacket(Type, Data) when is_integer(Type), Type >= 0, Type =< 255, is_binary(Data) ->
-    % One-octet length encoding is enough for our small subpackets.
+    % RFC 4880 signature subpacket length encoding: 1, 2, or 5 octets.
     Len = 1 + byte_size(Data),
-    <<Len:8, Type:8, Data/binary>>.
+    [encode_subpacket_len(Len), <<Type:8>>, Data].
+
+encode_subpacket_len(Len) when is_integer(Len), Len >= 0, Len < 192 ->
+    <<Len:8>>;
+encode_subpacket_len(Len) when is_integer(Len), Len >= 192, Len =< 8383 ->
+    Len2 = Len - 192,
+    First = (Len2 bsr 8) + 192,
+    Second = Len2 band 16#FF,
+    <<First:8, Second:8>>;
+encode_subpacket_len(Len) when is_integer(Len), Len >= 8384 ->
+    <<255:8, Len:32/big-unsigned>>.
 
 pubkey_prefix(PubKeyBody) ->
     Len = byte_size(PubKeyBody),
