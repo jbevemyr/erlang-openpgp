@@ -55,4 +55,24 @@ import_public_key_internal_formats_test() ->
     {ok, {#'ECPoint'{point = PubEd2}, {namedCurve, _}}} = openpgp_crypto:import_public_key(ArmoredEd),
     ?assertEqual(PubEd, PubEd2).
 
+import_public_bundle_key_formats_test() ->
+    {PrimaryPub, PrimaryPriv} = crypto:generate_key(eddsa, ed25519),
+    {SubPub, SubPriv} = crypto:generate_key(eddsa, ed25519),
+    {ok, PubKeyBlock, #{subkey_fpr := SubFpr}} =
+        openpgp_crypto:export_public_with_subkey(
+            {ed25519, PrimaryPub},
+            {ed25519, SubPub},
+            #{
+                userid => <<"Bundle <bundle@example.com>">>,
+                signing_key => PrimaryPriv,
+                subkey_signing_key => SubPriv,
+                subkey_flags => [sign]
+            }
+        ),
+
+    {ok, Bundle} = openpgp_crypto:import_public_bundle_key(PubKeyBlock),
+    ?assertMatch({#'ECPoint'{}, {namedCurve, _}}, maps:get(primary, Bundle)),
+    Subkeys = maps:get(subkeys, Bundle),
+    [#{pub := {#'ECPoint'{}, {namedCurve, _}}}] = [S || S <- Subkeys, maps:get(fpr, S) =:= SubFpr].
+
 

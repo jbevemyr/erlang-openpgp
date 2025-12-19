@@ -19,6 +19,8 @@
     import_public/1,
     import_public_key/1,
     import_public_bundle/1,
+    import_public_bundle_key/1,
+    crypto_pub_to_public_key/1,
     import_keypair/1,
     export_public/2,
     export_public_with_subkey/3,
@@ -38,6 +40,23 @@
 
 -type public_key_pub() ::
     #'RSAPublicKey'{} | {#'ECPoint'{}, {namedCurve, term()}}.
+
+%% @doc Convert an OTP `crypto` public key format to `public_key` record/tuple format.
+%%
+%% - RSA: `{rsa,[E,N]}` -> `#'RSAPublicKey'{...}`
+%% - Ed25519: `{ed25519,Pub32}` -> `{#'ECPoint'{point=Pub32}, {namedCurve, ...}}`
+-spec crypto_pub_to_public_key(crypto_pub()) -> {ok, public_key_pub()} | {error, term()}.
+crypto_pub_to_public_key({rsa, [Ebin, Nbin]}) when is_binary(Ebin), is_binary(Nbin) ->
+    {ok,
+        #'RSAPublicKey'{
+            modulus = binary:decode_unsigned(Nbin),
+            publicExponent = binary:decode_unsigned(Ebin)
+        }};
+crypto_pub_to_public_key({ed25519, Pub32}) when is_binary(Pub32), byte_size(Pub32) =:= 32 ->
+    Params = {namedCurve, pubkey_cert_records:namedCurves(ed25519)},
+    {ok, {#'ECPoint'{point = Pub32}, Params}};
+crypto_pub_to_public_key(Other) ->
+    {error, {unsupported_crypto_public_key, Other}}.
 
 -type export_opts() :: #{
     userid := iodata() | binary(),
@@ -111,6 +130,59 @@ import_public_bundle(Input) ->
                 error ->
                     {error, no_public_key_packet}
             end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @doc Like `import_public_bundle/1`, but converts `primary` and each subkey `pub`
+%% into `public_key` record/tuple formats (`#'RSAPublicKey'{}` / `{#'ECPoint'{}, Params}`).
+-spec import_public_bundle_key(iodata() | binary()) ->
+    {ok,
+        #{
+            primary := public_key_pub(),
+            primary_fpr := binary(),
+            primary_keyid := binary(),
+            primary_created := non_neg_integer(),
+            userids := [binary()],
+            subkeys := [
+                #{
+                    pub := public_key_pub(),
+                    fpr := binary(),
+                    keyid := binary(),
+                    created := non_neg_integer(),
+                    flags => non_neg_integer() | undefined
+                }
+            ]
+        }}
+    | {error, term()}.
+import_public_bundle_key(Input) ->
+    case import_public_bundle(Input) of
+        {ok, Bundle} ->
+            case crypto_pub_to_public_key(maps:get(primary, Bundle)) of
+                {ok, PrimaryPk} ->
+                    Subkeys0 = maps:get(subkeys, Bundle, []),
+                    case convert_subkeys_to_public_key(Subkeys0) of
+                        {ok, Subkeys1} ->
+                            {ok, Bundle#{primary => PrimaryPk, subkeys => Subkeys1}};
+                        {error, _} = Err1 ->
+                            Err1
+                    end;
+                {error, _} = Err0 ->
+                    Err0
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+convert_subkeys_to_public_key(Subkeys) ->
+    convert_subkeys_to_public_key(Subkeys, []).
+
+convert_subkeys_to_public_key([], Acc) ->
+    {ok, lists:reverse(Acc)};
+convert_subkeys_to_public_key([S | Rest], Acc) ->
+    case crypto_pub_to_public_key(maps:get(pub, S)) of
+        {ok, Pk} ->
+            convert_subkeys_to_public_key(Rest, [S#{pub => Pk} | Acc]);
         {error, _} = Err ->
             Err
     end.
