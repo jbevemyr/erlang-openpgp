@@ -43,7 +43,7 @@ gpg_tests() ->
         {"export primary+subkey and gpg import (RSA-4096 primary + RSA-4096 subkey)", fun rsa4096_primary_subkey_gpg_import/0},
         {"export primary+subkey and gpg import (RSA-4096, created in microseconds)", fun rsa4096_primary_subkey_gpg_import_created_us/0},
         {"export primary+subkey and gpg import (RSA-4096, ASN.1 RSAPrivateKey records)", fun rsa4096_primary_subkey_gpg_import_asn1_records/0},
-        {"export primary+subkey and gpg import (Strongbox exact params, RSA-4096)", fun strongbox_rsa4096_exact_params_gpg_import/0},
+        {"export primary+subkey and gpg import (exact params fixture, RSA-4096)", fun rsa4096_exact_params_fixture_gpg_import/0},
         {"import primary+subkey bundle and verify subkey signature in Erlang", fun import_bundle_verify_subkey_sig/0},
         {"gpg generates key+signing-subkey, signs, export public, import in Erlang, verify with subkey", fun gpg_signing_subkey_erlang_verify/0},
         {"sign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
@@ -326,7 +326,8 @@ rsa4096_primary_subkey_gpg_import_asn1_records() ->
         ok = file:make_dir(Home),
         ok = file:change_mode(Home, 8#700),
 
-        % Generate keys via public_key so we get ASN.1 records (runtime tuples) like Strongbox commonly uses.
+        % Generate keys via public_key so we get ASN.1 records (runtime tuples), matching callers that use
+        % `public_key:generate_key/1` / `#'RSAPrivateKey'{...}`.
         PrimaryPrivRec = public_key:generate_key({rsa, 4096, 65537}),
         SubPrivRec = public_key:generate_key({rsa, 4096, 65537}),
 
@@ -350,15 +351,15 @@ rsa4096_primary_subkey_gpg_import_asn1_records() ->
         Cleanup()
     end.
 
-strongbox_rsa4096_exact_params_gpg_import() ->
+rsa4096_exact_params_fixture_gpg_import() ->
     {Tmp, Cleanup} = mktemp_dir(),
     try
         Home = filename:join(Tmp, "home"),
         ok = file:make_dir(Home),
         ok = file:change_mode(Home, 8#700),
 
-        % Load the exact parameters as provided from Strongbox debugging.
-        {ok, [Term]} = file:consult("test/fixtures/strongbox_rsa4096_exact_params.term"),
+        % Load the exact parameters from a fixture file (RSA-4096 primary + RSA-4096 subkey).
+        {ok, [Term]} = file:consult("test/fixtures/rsa4096_exact_params.term"),
         {PrimaryPrivKey, SubKey, Opts0} = Term,
 
         {ok, PubArmored, _Meta} = openpgp_crypto:export_public_with_subkey(PrimaryPrivKey, SubKey, Opts0),
