@@ -40,6 +40,10 @@ gpg_tests() ->
         {"crypto-format -> gpg import (public, RSA/Ed25519)", fun crypto_to_gpg_public/0},
         {"sign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_sign_gpg_verify/0},
         {"sign in Erlang with subkey and verify with gpg (Ed25519 primary + Ed25519 subkey)", fun erlang_sign_subkey_gpg_verify/0},
+        {"export primary+subkey and gpg import (RSA-4096 primary + RSA-4096 subkey)", fun rsa4096_primary_subkey_gpg_import/0},
+        {"export primary+subkey and gpg import (RSA-4096, created in microseconds)", fun rsa4096_primary_subkey_gpg_import_created_us/0},
+        {"export primary+subkey and gpg import (RSA-4096, ASN.1 RSAPrivateKey records)", fun rsa4096_primary_subkey_gpg_import_asn1_records/0},
+        {"export primary+subkey and gpg import (Strongbox exact params, RSA-4096)", fun strongbox_rsa4096_exact_params_gpg_import/0},
         {"import primary+subkey bundle and verify subkey signature in Erlang", fun import_bundle_verify_subkey_sig/0},
         {"gpg generates key+signing-subkey, signs, export public, import in Erlang, verify with subkey", fun gpg_signing_subkey_erlang_verify/0},
         {"sign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
@@ -249,6 +253,116 @@ erlang_sign_subkey_gpg_verify() ->
         SigEdPath = filename:join(Tmp, "sig-subkey-ed.asc"),
         ok = file:write_file(SigEdPath, SigEd),
         ok = gpg_verify_detached(Home, SigEdPath, DataPath)
+    after
+        Cleanup()
+    end.
+
+rsa4096_primary_subkey_gpg_import() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+
+        % RSA-4096 primary + RSA-4096 signing-subkey: this stresses packet/subpacket length encoding.
+        {PrimaryPubRsa, PrimaryPrivRsa} = crypto:generate_key(rsa, {4096, 65537}),
+        {SubPubRsa, SubPrivRsa} = crypto:generate_key(rsa, {4096, 65537}),
+        Created = 1700000100,
+        {ok, PubArmoredRsa, _Meta} =
+            openpgp_crypto:export_public_with_subkey(
+                {rsa, PrimaryPubRsa},
+                {rsa, SubPubRsa},
+                #{
+                    userid => <<"Signer (RSA-4096 subkey) <signer-subkey-rsa4096@example.com>">>,
+                    created => Created,
+                    subkey_created => Created + 1,
+                    signing_key => PrimaryPrivRsa,
+                    subkey_signing_key => SubPrivRsa,
+                    subkey_flags => [sign]
+                }
+            ),
+
+        % This must import cleanly; we treat "unknown critical bit" as a hard error.
+        ok = gpg_import_public(Home, PubArmoredRsa)
+    after
+        Cleanup()
+    end.
+
+rsa4096_primary_subkey_gpg_import_created_us() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+
+        {PrimaryPubRsa, PrimaryPrivRsa} = crypto:generate_key(rsa, {4096, 65537}),
+        {SubPubRsa, SubPrivRsa} = crypto:generate_key(rsa, {4096, 65537}),
+
+        % Mimic a common bug: callers pass microseconds instead of seconds.
+        CreatedUs = 1700000200123456,
+        {ok, PubArmoredRsa, _Meta} =
+            openpgp_crypto:export_public_with_subkey(
+                {rsa, PrimaryPubRsa},
+                {rsa, SubPubRsa},
+                #{
+                    userid => <<"Signer (RSA-4096 subkey, created us) <signer-subkey-rsa4096-us@example.com>">>,
+                    created => CreatedUs,
+                    subkey_created => CreatedUs,
+                    subkey_binding_created => CreatedUs,
+                    signing_key => PrimaryPrivRsa,
+                    subkey_signing_key => SubPrivRsa,
+                    subkey_flags => [sign]
+                }
+            ),
+        ok = gpg_import_public(Home, PubArmoredRsa)
+    after
+        Cleanup()
+    end.
+
+rsa4096_primary_subkey_gpg_import_asn1_records() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+
+        % Generate keys via public_key so we get ASN.1 records (runtime tuples) like Strongbox commonly uses.
+        PrimaryPrivRec = public_key:generate_key({rsa, 4096, 65537}),
+        SubPrivRec = public_key:generate_key({rsa, 4096, 65537}),
+
+        Created = 1768320945,
+        {ok, PubArmoredRsa, _Meta} =
+            openpgp_crypto:export_public_with_subkey(
+                PrimaryPrivRec,
+                SubPrivRec,
+                #{
+                    userid => <<"security@avassa.io">>,
+                    created => Created,
+                    subkey_created => Created + 27,
+                    subkey_binding_created => Created + 27,
+                    signing_key => PrimaryPrivRec,
+                    subkey_signing_key => SubPrivRec,
+                    subkey_flags => [sign]
+                }
+            ),
+        ok = gpg_import_public(Home, PubArmoredRsa)
+    after
+        Cleanup()
+    end.
+
+strongbox_rsa4096_exact_params_gpg_import() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+
+        % Load the exact parameters as provided from Strongbox debugging.
+        {ok, [Term]} = file:consult("test/fixtures/strongbox_rsa4096_exact_params.term"),
+        {PrimaryPrivKey, SubKey, Opts0} = Term,
+
+        {ok, PubArmored, _Meta} = openpgp_crypto:export_public_with_subkey(PrimaryPrivKey, SubKey, Opts0),
+        ok = gpg_import_public(Home, PubArmored)
     after
         Cleanup()
     end.
@@ -629,12 +743,24 @@ gpg_import_public(Home, ArmoredBin) ->
         Path = filename:join(Tmp, "pub.asc"),
         ok = file:write_file(Path, ArmoredBin),
         case gpg(Home, ["--batch", "--yes", "--import", Path]) of
-            {ok, _} -> ok;
+            {ok, Out} ->
+                % gpg can return exit_status=0 even when it detected something it doesn't understand
+                % in key signatures (e.g. "unknown critical bit"). Treat that as a hard failure so
+                % we catch format regressions (especially for large RSA keys).
+                case has_gpg_import_warning(Out) of
+                    true -> error({gpg_import_warning, Out});
+                    false -> ok
+                end;
             {error, _} = Err -> error(Err)
         end
     after
         Cleanup()
     end.
+
+has_gpg_import_warning(Out) when is_binary(Out) ->
+    (binary:match(Out, <<"unknown critical bit">>) =/= nomatch) orelse
+        (binary:match(Out, <<"assuming bad signature">>) =/= nomatch) orelse
+        (binary:match(Out, <<" bad signature">>) =/= nomatch).
 
 gpg_import_secret(Home, ArmoredBin) ->
     {Tmp, Cleanup} = mktemp_dir(),
@@ -843,12 +969,28 @@ mktemp_dir() ->
             "" -> "/tmp";
             D -> D
         end,
-    Name = "gpg_it_" ++ integer_to_list(erlang:unique_integer([positive, monotonic])),
+    mktemp_dir(Base, 0).
+
+mktemp_dir(Base, Try) when is_integer(Try), Try >= 0, Try < 20 ->
+    % `unique_integer/1` resets between Erlang VMs, so names can collide across test runs if
+    % a previous run left temp dirs behind. Add time and retry on eexist for robustness.
+    Suffix =
+        integer_to_list(erlang:system_time(microsecond)) ++ "_" ++
+            integer_to_list(erlang:unique_integer([positive])),
+    Name = "gpg_it_" ++ Suffix,
     Dir = filename:join(Base, Name),
-    ok = file:make_dir(Dir),
-    ok = file:change_mode(Dir, 8#700),
-    Cleanup = fun() -> rm_rf(Dir) end,
-    {Dir, Cleanup}.
+    case file:make_dir(Dir) of
+        ok ->
+            ok = file:change_mode(Dir, 8#700),
+            Cleanup = fun() -> rm_rf(Dir) end,
+            {Dir, Cleanup};
+        {error, eexist} ->
+            mktemp_dir(Base, Try + 1);
+        {error, Reason} ->
+            error({mktemp_dir_failed, Reason, Dir})
+    end;
+mktemp_dir(_Base, _Try) ->
+    error(mktemp_dir_exhausted).
 
 rm_rf(Path) ->
     case file:list_dir(Path) of

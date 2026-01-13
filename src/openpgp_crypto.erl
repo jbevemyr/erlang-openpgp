@@ -85,6 +85,29 @@ maybe_flag(I, Mask, Atom) ->
         false -> []
     end.
 
+%% @doc Normalize OpenPGP v4 timestamps.
+%%
+%% OpenPGP v4 packets/signatures store "created" time as a 32-bit Unix timestamp in *seconds*.
+%% Callers sometimes accidentally pass milliseconds or microseconds; accept those when unambiguous.
+-spec normalize_created(non_neg_integer()) -> non_neg_integer().
+normalize_created(S) when is_integer(S), S >= 0, S =< 16#FFFFFFFF ->
+    S;
+normalize_created(Val) when is_integer(Val), Val > 16#FFFFFFFF ->
+    % Heuristic conversion:
+    % - microseconds -> seconds
+    % - milliseconds -> seconds
+    case Val div 1000000 of
+        Sec when Sec >= 0, Sec =< 16#FFFFFFFF ->
+            Sec;
+        _ ->
+            case Val div 1000 of
+                Sec2 when Sec2 >= 0, Sec2 =< 16#FFFFFFFF ->
+                    Sec2;
+                _ ->
+                    error({bad_created_timestamp, Val})
+            end
+    end.
+
 -type export_opts() :: #{
     userid := iodata() | binary(),
     created => non_neg_integer(),
@@ -240,7 +263,7 @@ public_key_info(Input) ->
 -spec export_secret(crypto_priv(), export_opts()) -> {ok, binary(), binary()} | {error, term()}.
 export_secret({rsa, Priv = [E, N, D, P, Q | _]}, Opts) when is_binary(E), is_binary(N), is_binary(D), is_binary(P), is_binary(Q) ->
     UserId = iolist_to_binary(maps:get(userid, Opts)),
-    Created = maps:get(created, Opts, erlang:system_time(second)),
+    Created = normalize_created(maps:get(created, Opts, erlang:system_time(second))),
     PubBody = iolist_to_binary([<<4:8, Created:32/big-unsigned, 1:8>>, openpgp_mpi:encode_bin(N), openpgp_mpi:encode_bin(E)]),
     % OpenPGP secret MPIs for RSA: d, p, q, u (where u = p^{-1} mod q)
     U = binary:encode_unsigned(modinv_int(binary:decode_unsigned(P), binary:decode_unsigned(Q))),
@@ -268,7 +291,7 @@ export_secret({rsa, Priv = [E, N, D, P, Q | _]}, Opts) when is_binary(E), is_bin
     {ok, gpg_keys:encode_private(Packets), Fpr};
 export_secret({ed25519, {Pub32, Priv32}}, Opts) when is_binary(Pub32), byte_size(Pub32) =:= 32, is_binary(Priv32), byte_size(Priv32) =:= 32 ->
     UserId = iolist_to_binary(maps:get(userid, Opts)),
-    Created = maps:get(created, Opts, erlang:system_time(second)),
+    Created = normalize_created(maps:get(created, Opts, erlang:system_time(second))),
     Oid = ed25519_oid(),
     PubOpaque = <<16#40, Pub32/binary>>,
     PubBody = iolist_to_binary([
@@ -387,7 +410,7 @@ import_keypair(Input) ->
 -spec export_public(crypto_pub(), export_opts()) -> {ok, binary(), binary()} | {error, term()}.
 export_public({rsa, [E, N]}, Opts) when is_binary(E), is_binary(N) ->
     UserId = iolist_to_binary(maps:get(userid, Opts)),
-    Created = maps:get(created, Opts, erlang:system_time(second)),
+    Created = normalize_created(maps:get(created, Opts, erlang:system_time(second))),
     PubBody = iolist_to_binary([<<4:8, Created:32/big-unsigned, 1:8>>, openpgp_mpi:encode_bin(N), openpgp_mpi:encode_bin(E)]),
     PubPkt = #{tag => 6, format => new, body => PubBody},
     UidPkt = #{tag => 13, format => new, body => UserId},
@@ -403,7 +426,7 @@ export_public({rsa, [E, N]}, Opts) when is_binary(E), is_binary(N) ->
     {ok, gpg_keys:encode_public(Packets), Fpr};
 export_public({ed25519, Pub32}, Opts) when is_binary(Pub32), byte_size(Pub32) =:= 32 ->
     UserId = iolist_to_binary(maps:get(userid, Opts)),
-    Created = maps:get(created, Opts, erlang:system_time(second)),
+    Created = normalize_created(maps:get(created, Opts, erlang:system_time(second))),
     Oid = ed25519_oid(),
     PubOpaque = <<16#40, Pub32/binary>>,
     PubBody = iolist_to_binary([
@@ -440,8 +463,8 @@ export_public(Other, _Opts) ->
     {ok, binary(), #{primary_fpr := binary(), subkey_fpr := binary()}} | {error, term()}.
 export_public_with_subkey(PrimaryAny, SubkeyAny, Opts0) ->
     UserId = iolist_to_binary(maps:get(userid, Opts0)),
-    CreatedPrimary = maps:get(created, Opts0, erlang:system_time(second)),
-    CreatedSub = maps:get(subkey_created, Opts0, CreatedPrimary),
+    CreatedPrimary = normalize_created(maps:get(created, Opts0, erlang:system_time(second))),
+    CreatedSub = normalize_created(maps:get(subkey_created, Opts0, CreatedPrimary)),
 
     case {to_crypto_pub(PrimaryAny), to_crypto_pub(SubkeyAny)} of
         {{ok, PrimaryPub}, {ok, SubPub}} ->
@@ -486,7 +509,7 @@ export_public_with_subkey(PrimaryAny, SubkeyAny, Opts0) ->
                                     PrimaryPubBody,
                                     SubPubBody,
                                     #{
-                                        created => maps:get(subkey_binding_created, Opts0, CreatedPrimary),
+                                        created => normalize_created(maps:get(subkey_binding_created, Opts0, CreatedPrimary)),
                                         subkey_flags => SubkeyFlagsInt,
                                         embedded_sig_body => EmbeddedSigBody
                                     }
