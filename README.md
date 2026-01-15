@@ -105,6 +105,14 @@ Subkeys = maps:get(subkeys, Bundle),
 ok = openpgp_detached_sig:verify(Data, SigArmored, {ed25519, SubPub32}).
 ```
 
+If you know the subkey **keyid**, you can look up the subkey public key directly:
+
+```erlang
+{ok, Bundle} = openpgp_crypto:import_public_bundle(PubKeyBlock),
+{ok, SubPub} = openpgp_crypto:subkey_pub_by_keyid(Bundle, SubKeyId),
+ok = openpgp_detached_sig:verify(Data, SigArmored, SubPub).
+```
+
 ### Export from `public_key` record formats
 
 If you have keys as ASN.1 records (e.g. `#'RSAPublicKey'{...}` or Ed25519 from `public_key:generate_key/1`),
@@ -175,6 +183,13 @@ Verify a `gpg`-created detached signature in Erlang:
 ```erlang
 ok = openpgp_detached_sig:verify(Data, SigArmoredOrBinary, {rsa, [E, N]}).
 ok = openpgp_detached_sig:verify(Data, SigArmoredOrBinary, {ed25519, Pub32}).
+```
+
+Create a **binary** detached signature (no ASCII armor):
+
+```erlang
+{ok, SigBin} =
+    openpgp_detached_sig:sign(Data, {ed25519, PrivEd}, #{hash => sha256, armor => false}).
 ```
 
 ### Cleartext signatures (clearsign)

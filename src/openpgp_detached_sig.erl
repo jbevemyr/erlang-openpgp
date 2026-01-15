@@ -32,7 +32,7 @@
     mpis := [binary()]
 }.
 
-%% @doc Create an ASCII-armored detached signature for Data.
+%% @doc Create a detached signature for Data.
 %%
 %% `Key` must be:
 %% - `{rsa, Priv}` where Priv is from `crypto:generate_key(rsa, ...)`
@@ -40,6 +40,7 @@
 %%
 %% Options:
 %% - `#{hash => sha256|sha512, created => UnixSeconds, issuer_fpr => Fingerprint20Bin, sig_type => 16#00|16#01}`
+%% - `#{armor => true|false}` (default true)
 -spec sign(binary() | iodata(), privkey(), map()) -> {ok, binary()} | {error, term()}.
 sign(Data0, Key, Opts) ->
     SigType = maps:get(sig_type, Opts, 16#00),
@@ -94,7 +95,11 @@ sign(Data0, Key, Opts) ->
             Mpis
         ]),
     Bin = openpgp_packets:encode([#{tag => 2, format => new, body => Body}]),
-    {ok, openpgp_armor:encode(<<"PGP SIGNATURE">>, Bin)}.
+    case maps:get(armor, Opts, true) of
+        true -> {ok, openpgp_armor:encode(<<"PGP SIGNATURE">>, Bin)};
+        false -> {ok, Bin};
+        Other -> return_error({bad_armor_opt, Other})
+    end.
 
 %% @doc Like `sign/3`, but also accepts common `public_key` key formats:
 %% - `#'RSAPrivateKey'{...}`

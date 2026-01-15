@@ -30,6 +30,13 @@ malformed_signature_test() ->
     ?assertEqual({error, #{reason => malformed_signature, message => <<"malformed signature">>}},
                  openpgp_detached_sig:verify(Data, BadSig, {ed25519, <<0:256>>})).
 
+binary_detached_signature_test() ->
+    Data = <<"The brown fox">>,
+    {PubEd, PrivEd} = crypto:generate_key(eddsa, ed25519),
+    {ok, SigBin} = openpgp_detached_sig:sign(Data, {ed25519, PrivEd}, #{hash => sha256, armor => false}),
+    ?assertEqual(nomatch, binary:match(SigBin, <<"BEGIN PGP SIGNATURE">>)),
+    ?assertEqual(ok, openpgp_detached_sig:verify(Data, SigBin, {ed25519, PubEd})).
+
 public_key_created_info_test() ->
     Now1 = erlang:system_time(second),
     KB = openpgp_keygen:ed25519(<<"Test <test@example.com>">>),
@@ -74,6 +81,27 @@ import_public_bundle_key_formats_test() ->
     ?assertMatch({#'ECPoint'{}, {namedCurve, _}}, maps:get(primary, Bundle)),
     Subkeys = maps:get(subkeys, Bundle),
     [#{pub := {#'ECPoint'{}, {namedCurve, _}}}] = [S || S <- Subkeys, maps:get(fpr, S) =:= SubFpr].
+
+subkey_pub_by_keyid_test() ->
+    {PrimaryPub, PrimaryPriv} = crypto:generate_key(eddsa, ed25519),
+    {SubPub, SubPriv} = crypto:generate_key(eddsa, ed25519),
+    {ok, PubKeyBlock, #{subkey_fpr := SubFpr}} =
+        openpgp_crypto:export_public_with_subkey(
+            {ed25519, PrimaryPub},
+            {ed25519, SubPub},
+            #{
+                userid => <<"Bundle <bundle@example.com>">>,
+                signing_key => PrimaryPriv,
+                subkey_signing_key => SubPriv,
+                subkey_flags => [sign]
+            }
+        ),
+    {ok, Bundle} = openpgp_crypto:import_public_bundle(PubKeyBlock),
+    Subkeys = maps:get(subkeys, Bundle),
+    [Subkey] = [S || S <- Subkeys, maps:get(fpr, S) =:= SubFpr],
+    KeyId = maps:get(keyid, Subkey),
+    {ok, Pub} = openpgp_crypto:subkey_pub_by_keyid(Bundle, KeyId),
+    ?assertEqual(maps:get(pub, Subkey), Pub).
 
 subkey_flags_to_atoms_test() ->
     ?assertEqual([], openpgp_crypto:subkey_flags_to_atoms(undefined)),

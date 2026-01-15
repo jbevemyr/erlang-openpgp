@@ -22,6 +22,7 @@
     import_public_bundle_key/1,
     crypto_pub_to_public_key/1,
     subkey_flags_to_atoms/1,
+    subkey_pub_by_keyid/2,
     import_keypair/1,
     export_public/2,
     export_public_with_subkey/3,
@@ -41,6 +42,7 @@
 
 -type public_key_pub() ::
     #'RSAPublicKey'{} | {#'ECPoint'{}, {namedCurve, term()}}.
+-type subkey_pub() :: crypto_pub() | public_key_pub().
 
 %% @doc Convert an OTP `crypto` public key format to `public_key` record/tuple format.
 %%
@@ -78,6 +80,17 @@ subkey_flags_to_atoms(I) when is_integer(I), I >= 0 ->
         maybe_flag(I, 16#10, split),
         maybe_flag(I, 16#20, auth)
     ]).
+
+%% @doc Find a subkey public key in a bundle by Key ID.
+%%
+%% Works for bundles returned by `import_public_bundle/1` and `import_public_bundle_key/1`.
+-spec subkey_pub_by_keyid(map(), binary()) -> {ok, subkey_pub()} | {error, term()}.
+subkey_pub_by_keyid(Bundle, KeyId) when is_map(Bundle), is_binary(KeyId) ->
+    Subkeys = maps:get(subkeys, Bundle, []),
+    case [maps:get(pub, S) || S <- Subkeys, maps:get(keyid, S, <<>>) =:= KeyId] of
+        [Pub | _] -> {ok, Pub};
+        [] -> {error, {no_subkey_keyid, KeyId}}
+    end.
 
 maybe_flag(I, Mask, Atom) ->
     case (I band Mask) =:= Mask of

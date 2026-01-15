@@ -413,14 +413,15 @@ gpg_signing_subkey_erlang_verify() ->
         ok = gen_key_signing_subkey(Home, rsa, EmailRsa),
         {ok, PubRsaArmored} = gpg_export_public(Home, EmailRsa),
         {ok, BundleRsa} = openpgp_crypto:import_public_bundle(PubRsaArmored),
-        SubKeyIdRsa = binary_to_list(gpg_first_secret_subkey_keyid(Home, EmailRsa)),
+        SubKeyIdRsaBin = gpg_first_secret_subkey_keyid(Home, EmailRsa),
+        SubKeyIdRsa = binary_to_list(SubKeyIdRsaBin),
         SigRsaPath = filename:join(Tmp, "gpg-sub-rsa.sig"),
         ok = gpg_sign_detached(Home, SubKeyIdRsa, DataPath, SigRsaPath),
         {ok, SigRsa} = file:read_file(SigRsaPath),
         PrimaryRsa = maps:get(primary, BundleRsa),
         % Primary should NOT verify (we signed with the subkey)
         ?assertMatch({error, _}, openpgp_detached_sig:verify(Data, SigRsa, PrimaryRsa)),
-        {ok, SubPubRsa} = pick_signing_subkey_pub(BundleRsa),
+        {ok, SubPubRsa} = pick_subkey_pub_by_keyid(BundleRsa, SubKeyIdRsaBin),
         ok = openpgp_detached_sig:verify(Data, SigRsa, SubPubRsa),
 
         % Ed25519: same flow (skip if environment can't generate Ed25519 subkeys in batch).
@@ -429,13 +430,14 @@ gpg_signing_subkey_erlang_verify() ->
             ok ->
                 {ok, PubEdArmored} = gpg_export_public(Home, EmailEd),
                 {ok, BundleEd} = openpgp_crypto:import_public_bundle(PubEdArmored),
-                SubKeyIdEd = binary_to_list(gpg_first_secret_subkey_keyid(Home, EmailEd)),
+                SubKeyIdEdBin = gpg_first_secret_subkey_keyid(Home, EmailEd),
+                SubKeyIdEd = binary_to_list(SubKeyIdEdBin),
                 SigEdPath = filename:join(Tmp, "gpg-sub-ed.sig"),
                 ok = gpg_sign_detached(Home, SubKeyIdEd, DataPath, SigEdPath),
                 {ok, SigEd} = file:read_file(SigEdPath),
                 PrimaryEd = maps:get(primary, BundleEd),
                 ?assertMatch({error, _}, openpgp_detached_sig:verify(Data, SigEd, PrimaryEd)),
-                {ok, SubPubEd} = pick_signing_subkey_pub(BundleEd),
+                {ok, SubPubEd} = pick_subkey_pub_by_keyid(BundleEd, SubKeyIdEdBin),
                 ok = openpgp_detached_sig:verify(Data, SigEd, SubPubEd);
             {skip, _Reason} ->
                 ok
@@ -823,6 +825,15 @@ pick_signing_subkey_pub(Bundle) ->
                 [S0 | _] -> {ok, maps:get(pub, S0)};
                 [] -> {error, no_subkeys}
             end
+    end.
+
+pick_subkey_pub_by_keyid(Bundle, KeyIdBin) when is_binary(KeyIdBin) ->
+    Subkeys = maps:get(subkeys, Bundle, []),
+    case [maps:get(pub, S) || S <- Subkeys, maps:get(keyid, S, <<>>) =:= KeyIdBin] of
+        [Pub | _] ->
+            {ok, Pub};
+        [] ->
+            pick_signing_subkey_pub(Bundle)
     end.
 
 gpg_verify_detached(Home, SigPath, DataPath) ->
