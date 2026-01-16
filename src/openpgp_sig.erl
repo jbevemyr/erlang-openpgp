@@ -27,6 +27,7 @@ self_cert(Alg, Key, PublicKeyBody, UserId) ->
 
 %% @doc Like `self_cert/4`, but accepts options:
 %% - `#{key_flags => binary() | 0..255}` to emit Key Flags subpacket (type 27)
+%% - `#{key_expiration => non_neg_integer()}` seconds until key expiry (subpacket 9)
 -spec self_cert(pubkey_alg(), map(), binary(), binary(), map()) -> #{packet := map(), fingerprint := binary()}.
 self_cert(Alg, Key, PublicKeyBody, UserId, Opts) ->
     HashAlg = sha512,
@@ -48,11 +49,11 @@ self_cert(Alg, Key, PublicKeyBody, UserId, Opts) ->
         iolist_to_binary(
             case maps:get(key_flags, Opts, undefined) of
                 undefined ->
-                    HashedSub0;
+                    maybe_add_expiration(HashedSub0, maps:get(key_expiration, Opts, undefined));
                 FlagsBin when is_binary(FlagsBin), byte_size(FlagsBin) >= 1 ->
-                    HashedSub0 ++ [subpacket(27, FlagsBin)];
+                    maybe_add_expiration(HashedSub0 ++ [subpacket(27, FlagsBin)], maps:get(key_expiration, Opts, undefined));
                 FlagsInt when is_integer(FlagsInt), FlagsInt >= 0, FlagsInt =< 255 ->
-                    HashedSub0 ++ [subpacket(27, <<FlagsInt:8>>)];
+                    maybe_add_expiration(HashedSub0 ++ [subpacket(27, <<FlagsInt:8>>)], maps:get(key_expiration, Opts, undefined));
                 Other ->
                     error({bad_key_flags, Other})
             end
@@ -106,6 +107,8 @@ self_cert(Alg, Key, PublicKeyBody, UserId, Opts) ->
 %% `SubkeyFlags` is the OpenPGP "Key Flags" subpacket value (subpacket type 27),
 %% typically one byte (e.g. 16#02 for "signing").
 %%
+%% `key_expiration` (Opts) is the subkey expiry in seconds (subpacket type 9).
+%%
 %% Returns #{packet => PacketMap}.
 -spec subkey_binding(pubkey_alg(), map(), binary(), binary(), map()) -> #{packet := map()}.
 subkey_binding(PrimaryAlg, Key, PrimaryPubBody, SubkeyPubBody, Opts) ->
@@ -120,6 +123,7 @@ subkey_binding(PrimaryAlg, Key, PrimaryPubBody, SubkeyPubBody, Opts) ->
     PrimaryKeyId = openpgp_fingerprint:keyid_from_fingerprint(PrimaryFpr),
     Now = maps:get(created, Opts, now_unix()),
     SubkeyFlags = maps:get(subkey_flags, Opts, undefined),
+    KeyExpiration = maps:get(key_expiration, Opts, undefined),
     EmbeddedSigBody = maps:get(embedded_sig_body, Opts, undefined),
 
     HashedSub0 =
@@ -130,11 +134,11 @@ subkey_binding(PrimaryAlg, Key, PrimaryPubBody, SubkeyPubBody, Opts) ->
     HashedSub1 =
         case SubkeyFlags of
             undefined ->
-                HashedSub0;
+                maybe_add_expiration(HashedSub0, KeyExpiration);
             FlagsBin when is_binary(FlagsBin), byte_size(FlagsBin) >= 1 ->
-                HashedSub0 ++ [subpacket(27, FlagsBin)];
+                maybe_add_expiration(HashedSub0 ++ [subpacket(27, FlagsBin)], KeyExpiration);
             FlagsInt when is_integer(FlagsInt), FlagsInt >= 0, FlagsInt =< 255 ->
-                HashedSub0 ++ [subpacket(27, <<FlagsInt:8>>)];
+                maybe_add_expiration(HashedSub0 ++ [subpacket(27, <<FlagsInt:8>>)], KeyExpiration);
             Other ->
                 error({bad_subkey_flags, Other})
         end,
@@ -244,6 +248,13 @@ subpacket(Type, Data) when is_integer(Type), Type >= 0, Type =< 255, is_binary(D
     % RFC 4880 signature subpacket length encoding: 1, 2, or 5 octets.
     Len = 1 + byte_size(Data),
     [encode_subpacket_len(Len), <<Type:8>>, Data].
+
+maybe_add_expiration(Subs, undefined) ->
+    Subs;
+maybe_add_expiration(Subs, Exp) when is_integer(Exp), Exp >= 0, Exp =< 16#FFFFFFFF ->
+    Subs ++ [subpacket(9, <<Exp:32/big-unsigned>>)];
+maybe_add_expiration(_Subs, Other) ->
+    error({bad_key_expiration, Other}).
 
 encode_subpacket_len(Len) when is_integer(Len), Len >= 0, Len < 192 ->
     <<Len:8>>;

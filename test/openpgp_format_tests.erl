@@ -93,6 +93,36 @@ primary_key_flags_export_test() ->
     Flags = primary_key_flags_from_packets(Packets),
     ?assertEqual(16#23, Flags).
 
+primary_key_expires_export_test() ->
+    {PubEd, PrivEd} = crypto:generate_key(eddsa, ed25519),
+    {ok, Armored, _Fpr} =
+        openpgp_crypto:export_public(
+            {ed25519, PubEd},
+            #{userid => <<"T <t@e>">>, signing_key => PrivEd, primary_expires => 86400}
+        ),
+    {ok, #{packets := Packets}} = gpg_keys:decode(Armored),
+    Expires = primary_key_expiration_from_packets(Packets),
+    ?assertEqual(86400, Expires).
+
+subkey_expires_export_test() ->
+    {PrimaryPub, PrimaryPriv} = crypto:generate_key(eddsa, ed25519),
+    {SubPub, SubPriv} = crypto:generate_key(eddsa, ed25519),
+    {ok, PubKeyBlock, _} =
+        openpgp_crypto:export_public_with_subkey(
+            {ed25519, PrimaryPub},
+            {ed25519, SubPub},
+            #{
+                userid => <<"Bundle <bundle@example.com>">>,
+                signing_key => PrimaryPriv,
+                subkey_signing_key => SubPriv,
+                subkey_flags => [sign],
+                subkey_expires => 172800
+            }
+        ),
+    {ok, #{packets := Packets}} = gpg_keys:decode(PubKeyBlock),
+    Expires = subkey_expiration_from_packets(Packets),
+    ?assertEqual(172800, Expires).
+
 subkey_pub_by_keyid_test() ->
     {PrimaryPub, PrimaryPriv} = crypto:generate_key(eddsa, ed25519),
     {SubPub, SubPriv} = crypto:generate_key(eddsa, ed25519),
@@ -132,6 +162,46 @@ find_selfsig_flags([Body | Rest]) ->
             end;
         _ ->
             find_selfsig_flags(Rest)
+    end.
+
+primary_key_expiration_from_packets(Packets) ->
+    SigBodies = [maps:get(body, P) || P <- Packets, maps:get(tag, P) =:= 2],
+    case find_selfsig_expiration(SigBodies) of
+        {ok, Exp} -> Exp;
+        error -> error(no_primary_key_expiration_found)
+    end.
+
+find_selfsig_expiration([]) ->
+    error;
+find_selfsig_expiration([Body | Rest]) ->
+    case parse_v4_sig_info(Body) of
+        {ok, #{sig_type := 16#13, hashed_sub := Hashed}} ->
+            case find_sig_subpacket(9, Hashed) of
+                {ok, <<Exp:32/big-unsigned, _/binary>>} -> {ok, Exp};
+                _ -> find_selfsig_expiration(Rest)
+            end;
+        _ ->
+            find_selfsig_expiration(Rest)
+    end.
+
+subkey_expiration_from_packets(Packets) ->
+    SigBodies = [maps:get(body, P) || P <- Packets, maps:get(tag, P) =:= 2],
+    case find_subkey_binding_expiration(SigBodies) of
+        {ok, Exp} -> Exp;
+        error -> error(no_subkey_expiration_found)
+    end.
+
+find_subkey_binding_expiration([]) ->
+    error;
+find_subkey_binding_expiration([Body | Rest]) ->
+    case parse_v4_sig_info(Body) of
+        {ok, #{sig_type := 16#18, hashed_sub := Hashed}} ->
+            case find_sig_subpacket(9, Hashed) of
+                {ok, <<Exp:32/big-unsigned, _/binary>>} -> {ok, Exp};
+                _ -> find_subkey_binding_expiration(Rest)
+            end;
+        _ ->
+            find_subkey_binding_expiration(Rest)
     end.
 
 parse_v4_sig_info(

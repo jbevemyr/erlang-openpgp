@@ -126,6 +126,10 @@ normalize_created(Val) when is_integer(Val), Val > 16#FFFFFFFF ->
     created => non_neg_integer(),
     % Optional: primary key flags (signature subpacket 27).
     primary_key_flags => binary() | non_neg_integer() | [atom()],
+    % Optional: primary key expiration in seconds (signature subpacket 9).
+    primary_expires => non_neg_integer(),
+    % Optional: alias for primary_expires.
+    expires => non_neg_integer(),
     % Optional: if present we add a self-cert signature.
     signing_key => rsa_priv() | ed_priv(),
     % Optional: attach one signing subkey (export as tag 14) with a 0x18 binding signature.
@@ -133,6 +137,8 @@ normalize_created(Val) when is_integer(Val), Val > 16#FFFFFFFF ->
     subkey_created => non_neg_integer(),
     subkey_binding_created => non_neg_integer(),
     subkey_signing_key => term(),
+    % Optional: subkey expiration in seconds (signature subpacket 9).
+    subkey_expires => non_neg_integer(),
     % Subkey key flags (OpenPGP signature subpacket 27). Usually 1 byte (e.g. 16#02 for signing).
     subkey_flags => binary() | non_neg_integer() | [atom()]
 }.
@@ -432,7 +438,7 @@ export_public({rsa, [E, N]}, Opts) when is_binary(E), is_binary(N) ->
     Packets =
         case maps:find(signing_key, Opts) of
             error ->
-                case maps:is_key(primary_key_flags, Opts) of
+                case maps:is_key(primary_key_flags, Opts) orelse maps:is_key(primary_expires, Opts) orelse maps:is_key(expires, Opts) of
                     true -> return_error(missing_signing_key_for_primary_flags);
                     false -> [PubPkt, UidPkt]
                 end;
@@ -458,7 +464,7 @@ export_public({ed25519, Pub32}, Opts) when is_binary(Pub32), byte_size(Pub32) =:
     Packets =
         case maps:find(signing_key, Opts) of
             error ->
-                case maps:is_key(primary_key_flags, Opts) of
+                case maps:is_key(primary_key_flags, Opts) orelse maps:is_key(primary_expires, Opts) orelse maps:is_key(expires, Opts) of
                     true -> return_error(missing_signing_key_for_primary_flags);
                     false -> [PubPkt, UidPkt]
                 end;
@@ -536,6 +542,7 @@ export_public_with_subkey(PrimaryAny, SubkeyAny, Opts0) ->
                                     #{
                                         created => normalize_created(maps:get(subkey_binding_created, Opts0, CreatedPrimary)),
                                         subkey_flags => SubkeyFlagsInt,
+                                        key_expiration => subkey_expires_seconds(Opts0),
                                         embedded_sig_body => EmbeddedSigBody
                                     }
                                 ),
@@ -855,15 +862,39 @@ subkey_flags_int(Other) ->
     error({bad_subkey_flags, Other}).
 
 self_cert_opts(Opts) ->
-    case maps:find(primary_key_flags, Opts) of
-        error ->
-            #{};
-        {ok, Flags0} ->
-            #{key_flags => primary_key_flags_int(Flags0)}
+    FlagsOpt =
+        case maps:find(primary_key_flags, Opts) of
+            error -> #{};
+            {ok, Flags0} -> #{key_flags => primary_key_flags_int(Flags0)}
+        end,
+    case primary_expires_seconds(Opts) of
+        undefined -> FlagsOpt;
+        Exp -> FlagsOpt#{key_expiration => Exp}
     end.
 
 primary_key_flags_int(Flags) ->
     subkey_flags_int(Flags).
+
+primary_expires_seconds(Opts) ->
+    case maps:find(primary_expires, Opts) of
+        {ok, Exp} -> expiration_seconds(Exp);
+        error ->
+            case maps:find(expires, Opts) of
+                {ok, Exp2} -> expiration_seconds(Exp2);
+                error -> undefined
+            end
+    end.
+
+subkey_expires_seconds(Opts) ->
+    case maps:find(subkey_expires, Opts) of
+        {ok, Exp} -> expiration_seconds(Exp);
+        error -> undefined
+    end.
+
+expiration_seconds(Exp) when is_integer(Exp), Exp >= 0, Exp =< 16#FFFFFFFF ->
+    Exp;
+expiration_seconds(Other) ->
+    error({bad_key_expiration, Other}).
 
 subkey_flag_atom_bit(certify, Acc) ->
     Acc bor 16#01;

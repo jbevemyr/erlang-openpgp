@@ -53,7 +53,9 @@ Export a public key from crypto format to OpenPGP (GPG format). For best compati
         userid => <<"Me <me@example.com>">>,
         signing_key => PrivRsa,
         % Optional primary key usage (Key Flags subpacket 27):
-        primary_key_flags => [certify, sign]
+        primary_key_flags => [certify, sign],
+        % Optional primary key expiration in seconds:
+        primary_expires => 3600
     }).
 ```
 
@@ -90,7 +92,8 @@ Data = <<"The brown fox">>,
             userid => <<"Me <me@example.com>">>,
             signing_key => PrimaryPriv,
             subkey_signing_key => SubPriv,
-            subkey_flags => [sign] % or 16#02
+            subkey_flags => [sign], % or 16#02
+            subkey_expires => 86400
         }
     ),
 
