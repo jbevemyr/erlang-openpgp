@@ -3,7 +3,7 @@
 %%% This produces Signature packets that GnuPG accepts for primary keys.
 -module(openpgp_sig).
 
--export([self_cert/4, subkey_binding/5, primary_key_binding/4]).
+-export([self_cert/4, self_cert/5, subkey_binding/5, primary_key_binding/4]).
 
 % Sig type 0x13: Positive certification of a User ID and Public-Key packet.
 -define(SIGTYPE_POSITIVE_CERT, 16#13).
@@ -23,6 +23,12 @@
 %% Returns #{packet => PacketMap, fingerprint => FingerprintBin}.
 -spec self_cert(pubkey_alg(), map(), binary(), binary()) -> #{packet := map(), fingerprint := binary()}.
 self_cert(Alg, Key, PublicKeyBody, UserId) ->
+    self_cert(Alg, Key, PublicKeyBody, UserId, #{}).
+
+%% @doc Like `self_cert/4`, but accepts options:
+%% - `#{key_flags => binary() | 0..255}` to emit Key Flags subpacket (type 27)
+-spec self_cert(pubkey_alg(), map(), binary(), binary(), map()) -> #{packet := map(), fingerprint := binary()}.
+self_cert(Alg, Key, PublicKeyBody, UserId, Opts) ->
     HashAlg = sha512,
     PkAlgId =
         case Alg of
@@ -34,10 +40,23 @@ self_cert(Alg, Key, PublicKeyBody, UserId) ->
     KeyId = openpgp_fingerprint:keyid_from_fingerprint(Fingerprint),
     Now = now_unix(),
 
-    HashedSub = iolist_to_binary([
+    HashedSub0 = [
         subpacket(2, <<Now:32/big-unsigned>>),
         subpacket(33, <<4:8, Fingerprint/binary>>)
-    ]),
+    ],
+    HashedSub =
+        iolist_to_binary(
+            case maps:get(key_flags, Opts, undefined) of
+                undefined ->
+                    HashedSub0;
+                FlagsBin when is_binary(FlagsBin), byte_size(FlagsBin) >= 1 ->
+                    HashedSub0 ++ [subpacket(27, FlagsBin)];
+                FlagsInt when is_integer(FlagsInt), FlagsInt >= 0, FlagsInt =< 255 ->
+                    HashedSub0 ++ [subpacket(27, <<FlagsInt:8>>)];
+                Other ->
+                    error({bad_key_flags, Other})
+            end
+        ),
     UnhashedSub = iolist_to_binary([
         subpacket(16, KeyId)
     ]),

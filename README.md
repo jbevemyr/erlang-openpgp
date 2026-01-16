@@ -51,7 +51,9 @@ Export a public key from crypto format to OpenPGP (GPG format). For best compati
 {ok, Armored, _Fpr} =
     openpgp_crypto:export_public({rsa, PubRsa}, #{
         userid => <<"Me <me@example.com>">>,
-        signing_key => PrivRsa
+        signing_key => PrivRsa,
+        % Optional primary key usage (Key Flags subpacket 27):
+        primary_key_flags => [certify, sign]
     }).
 ```
 

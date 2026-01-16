@@ -82,6 +82,17 @@ import_public_bundle_key_formats_test() ->
     Subkeys = maps:get(subkeys, Bundle),
     [#{pub := {#'ECPoint'{}, {namedCurve, _}}}] = [S || S <- Subkeys, maps:get(fpr, S) =:= SubFpr].
 
+primary_key_flags_export_test() ->
+    {PubEd, PrivEd} = crypto:generate_key(eddsa, ed25519),
+    {ok, Armored, _Fpr} =
+        openpgp_crypto:export_public(
+            {ed25519, PubEd},
+            #{userid => <<"T <t@e>">>, signing_key => PrivEd, primary_key_flags => [certify, sign, auth]}
+        ),
+    {ok, #{packets := Packets}} = gpg_keys:decode(Armored),
+    Flags = primary_key_flags_from_packets(Packets),
+    ?assertEqual(16#23, Flags).
+
 subkey_pub_by_keyid_test() ->
     {PrimaryPub, PrimaryPriv} = crypto:generate_key(eddsa, ed25519),
     {SubPub, SubPriv} = crypto:generate_key(eddsa, ed25519),
@@ -102,6 +113,51 @@ subkey_pub_by_keyid_test() ->
     KeyId = maps:get(keyid, Subkey),
     {ok, Pub} = openpgp_crypto:subkey_pub_by_keyid(Bundle, KeyId),
     ?assertEqual(maps:get(pub, Subkey), Pub).
+
+primary_key_flags_from_packets(Packets) ->
+    SigBodies = [maps:get(body, P) || P <- Packets, maps:get(tag, P) =:= 2],
+    case find_selfsig_flags(SigBodies) of
+        {ok, Flags} -> Flags;
+        error -> error(no_primary_key_flags_found)
+    end.
+
+find_selfsig_flags([]) ->
+    error;
+find_selfsig_flags([Body | Rest]) ->
+    case parse_v4_sig_info(Body) of
+        {ok, #{sig_type := 16#13, hashed_sub := Hashed}} ->
+            case find_sig_subpacket(27, Hashed) of
+                {ok, <<Flags:8, _/binary>>} -> {ok, Flags};
+                _ -> find_selfsig_flags(Rest)
+            end;
+        _ ->
+            find_selfsig_flags(Rest)
+    end.
+
+parse_v4_sig_info(
+    <<4:8, SigType:8, _PkAlgId:8, _HashAlgId:8, HashedLen:16/big-unsigned, Hashed:HashedLen/binary,
+      UnhashedLen:16/big-unsigned, _Unhashed:UnhashedLen/binary, _Hash16:2/binary, _Rest/binary>>
+) ->
+    {ok, #{sig_type => SigType, hashed_sub => Hashed}};
+parse_v4_sig_info(_Other) ->
+    {error, bad_signature_packet}.
+
+find_sig_subpacket(Type, Bin) when is_integer(Type), is_binary(Bin) ->
+    find_sig_subpacket(Type, Bin, error).
+
+find_sig_subpacket(_Type, <<>>, Default) ->
+    Default;
+find_sig_subpacket(Type, <<Len:8, T:8, Rest/binary>>, Default) when Len >= 1 ->
+    BodyLen = Len - 1,
+    case Rest of
+        <<Body:BodyLen/binary, Tail/binary>> ->
+            case T =:= Type of
+                true -> {ok, Body};
+                false -> find_sig_subpacket(Type, Tail, Default)
+            end;
+        _ ->
+            Default
+    end.
 
 subkey_flags_to_atoms_test() ->
     ?assertEqual([], openpgp_crypto:subkey_flags_to_atoms(undefined)),

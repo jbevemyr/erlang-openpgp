@@ -124,6 +124,8 @@ normalize_created(Val) when is_integer(Val), Val > 16#FFFFFFFF ->
 -type export_opts() :: #{
     userid := iodata() | binary(),
     created => non_neg_integer(),
+    % Optional: primary key flags (signature subpacket 27).
+    primary_key_flags => binary() | non_neg_integer() | [atom()],
     % Optional: if present we add a self-cert signature.
     signing_key => rsa_priv() | ed_priv(),
     % Optional: attach one signing subkey (export as tag 14) with a 0x18 binding signature.
@@ -430,9 +432,13 @@ export_public({rsa, [E, N]}, Opts) when is_binary(E), is_binary(N) ->
     Packets =
         case maps:find(signing_key, Opts) of
             error ->
-                [PubPkt, UidPkt];
+                case maps:is_key(primary_key_flags, Opts) of
+                    true -> return_error(missing_signing_key_for_primary_flags);
+                    false -> [PubPkt, UidPkt]
+                end;
             {ok, Priv} ->
-                #{packet := SigPkt} = openpgp_sig:self_cert(rsa, #{priv => Priv}, PubBody, UserId),
+                SelfCertOpts = self_cert_opts(Opts),
+                #{packet := SigPkt} = openpgp_sig:self_cert(rsa, #{priv => Priv}, PubBody, UserId, SelfCertOpts),
                 [PubPkt, UidPkt, SigPkt]
         end,
     Fpr = openpgp_fingerprint:v4_fingerprint(PubBody),
@@ -452,9 +458,13 @@ export_public({ed25519, Pub32}, Opts) when is_binary(Pub32), byte_size(Pub32) =:
     Packets =
         case maps:find(signing_key, Opts) of
             error ->
-                [PubPkt, UidPkt];
+                case maps:is_key(primary_key_flags, Opts) of
+                    true -> return_error(missing_signing_key_for_primary_flags);
+                    false -> [PubPkt, UidPkt]
+                end;
             {ok, Priv32} when is_binary(Priv32), byte_size(Priv32) =:= 32 ->
-                #{packet := SigPkt} = openpgp_sig:self_cert(ed25519, #{priv => Priv32}, PubBody, UserId),
+                SelfCertOpts = self_cert_opts(Opts),
+                #{packet := SigPkt} = openpgp_sig:self_cert(ed25519, #{priv => Priv32}, PubBody, UserId, SelfCertOpts),
                 [PubPkt, UidPkt, SigPkt];
             {ok, Other} ->
                 return_error({bad_signing_key, Other})
@@ -488,7 +498,9 @@ export_public_with_subkey(PrimaryAny, SubkeyAny, Opts0) ->
 
                     PrimaryPkt = #{tag => 6, format => new, body => PrimaryPubBody},
                     UidPkt = #{tag => 13, format => new, body => UserId},
-                    #{packet := SelfSigPkt} = openpgp_sig:self_cert(PrimaryAlg, #{priv => PrimaryPrivForSig}, PrimaryPubBody, UserId),
+                    SelfCertOpts = self_cert_opts(Opts0),
+                    #{packet := SelfSigPkt} =
+                        openpgp_sig:self_cert(PrimaryAlg, #{priv => PrimaryPrivForSig}, PrimaryPubBody, UserId, SelfCertOpts),
 
                     SubPkt = #{tag => 14, format => new, body => SubPubBody},
                     SubkeyFlagsInt = subkey_flags_int(maps:get(subkey_flags, Opts0, 16#02)),
@@ -841,6 +853,17 @@ subkey_flags_int(Atoms) when is_list(Atoms) ->
     lists:foldl(fun subkey_flag_atom_bit/2, 0, Atoms);
 subkey_flags_int(Other) ->
     error({bad_subkey_flags, Other}).
+
+self_cert_opts(Opts) ->
+    case maps:find(primary_key_flags, Opts) of
+        error ->
+            #{};
+        {ok, Flags0} ->
+            #{key_flags => primary_key_flags_int(Flags0)}
+    end.
+
+primary_key_flags_int(Flags) ->
+    subkey_flags_int(Flags).
 
 subkey_flag_atom_bit(certify, Acc) ->
     Acc bor 16#01;
