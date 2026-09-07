@@ -347,3 +347,9 @@ ed25519_private_tuple_without_public_test() ->
     {ok, Armored, _} = openpgp_crypto:export_public_key(
         {'ECPrivateKey', 1, Priv, {namedCurve, Oid}, asn1_NOVALUE}, #{userid => <<"T <t@e>">>}),
     {ok, {ed25519, Pub}} = openpgp_crypto:import_public(Armored).
+
+fingerprint_matches_export_test() ->
+    {Pub, _} = crypto:generate_key(eddsa, ed25519),
+    Created = 1700000000,
+    {ok, _Armored, Fpr} = openpgp_crypto:export_public({ed25519, Pub}, #{userid => <<"F <f@e>">>, created => Created}),
+    ?assertEqual({ok, Fpr}, openpgp_crypto:fingerprint({ed25519, Pub}, Created)).

@@ -29,7 +29,8 @@
     export_public_key/2,
     export_secret/2,
     export_secret_key/2,
-    public_key_info/1
+    public_key_info/1,
+    fingerprint/2
 ]).
 
 -type rsa_pub() :: [binary()]. % [E,N] as returned by crypto:generate_key/2
@@ -43,6 +44,16 @@
 -type public_key_pub() ::
     #'RSAPublicKey'{} | {#'ECPoint'{}, {namedCurve, term()}}.
 -type subkey_pub() :: crypto_pub() | public_key_pub().
+
+%% @doc The v4 fingerprint a key gets when exported with the given creation
+%% time, without building or signing a key block. Accepts every key form
+%% `export_public_key/2` does.
+-spec fingerprint(term(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
+fingerprint(KeyAny, Created) ->
+    case to_crypto_pub(KeyAny) of
+        {ok, Pub} -> {ok, openpgp_fingerprint:v4_fingerprint(pubkey_body(Pub, normalize_created(Created)))};
+        {error, _} = Err -> Err
+    end.
 
 %% @doc Convert an OTP `crypto` public key format to `public_key` record/tuple format.
 %%
