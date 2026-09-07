@@ -31,9 +31,10 @@ sign(Text0, Key, Opts) ->
             sha512 -> <<"SHA512">>
         end,
     % Dash-escape for transport; signature is computed over unescaped text.
-    % Important: In the cleartext signature framework, the signed text is the
-    % cleartext body *without* the line ending that precedes the signature block.
-    TextForSig = drop_trailing_newline(Text),
+    % In the cleartext signature framework the signed text has trailing
+    % whitespace removed from every line (RFC 4880 7.1) and excludes the line
+    % ending that precedes the signature block.
+    TextForSig = drop_trailing_newline(openpgp_text:strip_trailing_whitespace(Text)),
     Escaped = openpgp_text:dash_escape(Text),
     {ok, SigArmored} =
         openpgp_detached_sig:sign(
@@ -65,7 +66,9 @@ sign(Text0, Key, Opts) ->
 verify(Clearsigned0, PubKey) ->
     case parse(Clearsigned0) of
         {ok, #{text := Text, signature := Sig}} ->
-            openpgp_detached_sig:verify(Text, Sig, PubKey);
+            openpgp_detached_sig:verify(
+                openpgp_text:strip_trailing_whitespace(Text), Sig, PubKey, #{sig_type => 16#01}
+            );
         {error, _} = Err ->
             Err
     end.

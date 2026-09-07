@@ -19,7 +19,8 @@ gpg_required_test_() ->
                 ok ->
                     case gpg_preflight() of
                         ok ->
-                            gpg_tests();
+                            %% RSA-4096 key generation alone can exceed eunit's default 5 s.
+            [{timeout, 120, T} || T <- gpg_tests()];
                         {skip, Reason} ->
                             [{"SKIP gpg integration tests (preflight): " ++ skip_reason_to_list(Reason), fun() -> ok end}]
                     end

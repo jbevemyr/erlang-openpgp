@@ -145,8 +145,9 @@ normalize_created(Val) when is_integer(Val), Val > 16#FFFFFFFF ->
 
 %% @doc Import an OpenPGP public keyblock that may contain a primary key + subkeys.
 %%
-%% This is a "structural" import: it extracts key material and useful metadata
-%% (fingerprints, created, key flags), but does not currently verify binding signatures.
+%% Certifications and subkey bindings are verified (see `verify_bundle/4`);
+%% `self_certified` tells whether a User ID carries a valid self-signature,
+%% and only bound subkeys are returned.
 %%
 %% Returns:
 %% - primary public key in OTP crypto-format
@@ -161,6 +162,7 @@ normalize_created(Val) when is_integer(Val), Val > 16#FFFFFFFF ->
             primary_keyid := binary(),
             primary_created := non_neg_integer(),
             userids := [binary()],
+            self_certified := boolean(),
             subkeys := [
                 #{
                     pub := crypto_pub(),
@@ -182,16 +184,21 @@ import_public_bundle(Input) ->
                             case parse_public_key_body(PrimaryBody) of
                                 {ok, PrimaryPub} ->
                                     UserIds = [maps:get(body, P) || P <- Packets, maps:get(tag, P) =:= 13],
-                                    SubInfos = parse_subkeys(Packets),
-                                    {ok,
-                                        #{
-                                            primary => PrimaryPub,
-                                            primary_fpr => PrimaryFpr,
-                                            primary_keyid => PrimaryKeyId,
-                                            primary_created => PrimaryCreated,
-                                            userids => UserIds,
-                                            subkeys => SubInfos
-                                        }};
+                                    case verify_bundle(Packets, PrimaryBody, PrimaryPub, PrimaryFpr) of
+                                        {ok, SelfCertified, SubInfos} ->
+                                            {ok,
+                                                #{
+                                                    primary => PrimaryPub,
+                                                    primary_fpr => PrimaryFpr,
+                                                    primary_keyid => PrimaryKeyId,
+                                                    primary_created => PrimaryCreated,
+                                                    userids => UserIds,
+                                                    self_certified => SelfCertified,
+                                                    subkeys => SubInfos
+                                                }};
+                                        {error, _} = Err0 ->
+                                            Err0
+                                    end;
                                 {error, _} = Err1 ->
                                     Err1
                             end;
@@ -205,6 +212,117 @@ import_public_bundle(Input) ->
             Err
     end.
 
+%% Walk the key block in order and check the signatures that tie it
+%% together, the way GnuPG does before it trusts any of it:
+%% - a User ID is self-certified when a certification (0x10-0x13) that names
+%%   the primary key as issuer verifies with it; one that names the primary
+%%   and does not verify is an error. Certifications by other keys are
+%%   ignored.
+%% - a subkey is kept only with a binding signature (0x18) by the primary
+%%   key that verifies over both keys; a signing-capable subkey must also
+%%   carry a back signature (0x19, embedded subpacket 32) by the subkey.
+%%   Subkeys with an algorithm we cannot represent are skipped, since they
+%%   cannot be used anyway.
+%% Key flags are read from the verified binding, never from an unverified one.
+verify_bundle(Packets, PrimaryBody, PrimaryPub, PrimaryFpr) ->
+    PrimaryKeyId = openpgp_fingerprint:keyid_from_fingerprint(PrimaryFpr),
+    Issuer = #{fpr => PrimaryFpr, keyid => PrimaryKeyId},
+    verify_bundle(Packets, PrimaryBody, PrimaryPub, Issuer, false, []).
+
+verify_bundle([], _PrimaryBody, _PrimaryPub, _Issuer, SelfCertified, Subs) ->
+    {ok, SelfCertified, lists:reverse(Subs)};
+verify_bundle([#{tag := 13, body := UserId} | Rest], PrimaryBody, PrimaryPub, Issuer, SelfCertified, Subs) ->
+    {Sigs, Rest2} = take_signatures(Rest),
+    Prefix = iolist_to_binary([pubkey_prefix(PrimaryBody), userid_prefix(UserId)]),
+    case verify_certifications(Sigs, Prefix, PrimaryPub, Issuer) of
+        ok -> verify_bundle(Rest2, PrimaryBody, PrimaryPub, Issuer, SelfCertified orelse Sigs =/= [], Subs);
+        certified -> verify_bundle(Rest2, PrimaryBody, PrimaryPub, Issuer, true, Subs);
+        uncertified -> verify_bundle(Rest2, PrimaryBody, PrimaryPub, Issuer, SelfCertified, Subs);
+        {error, Reason} -> {error, {invalid_self_certification, UserId, Reason}}
+    end;
+verify_bundle([#{tag := 14, body := SubBody} | Rest], PrimaryBody, PrimaryPub, Issuer, SelfCertified, Subs) ->
+    {Sigs, Rest2} = take_signatures(Rest),
+    case {public_key_body_info(SubBody), parse_public_key_body(SubBody)} of
+        {{ok, #{created := Created, fingerprint := Fpr, keyid := KeyId}}, {ok, SubPub}} ->
+            Prefix = iolist_to_binary([pubkey_prefix(PrimaryBody), pubkey_prefix(SubBody)]),
+            case verify_binding(Sigs, Prefix, PrimaryPub, SubPub) of
+                {ok, Flags} ->
+                    Sub = #{pub => SubPub, fpr => Fpr, keyid => KeyId, created => Created, flags => Flags},
+                    verify_bundle(Rest2, PrimaryBody, PrimaryPub, Issuer, SelfCertified, [Sub | Subs]);
+                {error, Reason} ->
+                    {error, {unbound_subkey, KeyId, Reason}}
+            end;
+        _ ->
+            %% Not representable (e.g. an ECDH encryption subkey): skip it.
+            verify_bundle(Rest2, PrimaryBody, PrimaryPub, Issuer, SelfCertified, Subs)
+    end;
+verify_bundle([_Other | Rest], PrimaryBody, PrimaryPub, Issuer, SelfCertified, Subs) ->
+    verify_bundle(Rest, PrimaryBody, PrimaryPub, Issuer, SelfCertified, Subs).
+
+take_signatures(Packets) ->
+    lists:splitwith(fun(#{tag := T}) -> T =:= 2 end, Packets).
+
+%% certified: a self-certification verified. uncertified: none named the
+%% primary key. error: one named the primary key and failed.
+verify_certifications(Sigs, Prefix, PrimaryPub, Issuer) ->
+    Self = [B || #{body := B} <- Sigs, names_issuer(B, Issuer)],
+    case Self of
+        [] ->
+            uncertified;
+        _ ->
+            Results = [openpgp_detached_sig:verify_key_signature(Prefix, B, PrimaryPub, [16#10, 16#11, 16#12, 16#13]) || B <- Self],
+            case lists:any(fun({ok, _}) -> true; (_) -> false end, Results) of
+                true -> certified;
+                false -> hd([Err || {error, _} = Err <- Results])
+            end
+    end.
+
+%% The primary key must bind the subkey (0x18). If the binding grants the
+%% signing flag, the subkey must bind the primary back (0x19) inside it.
+verify_binding([], _Prefix, _PrimaryPub, _SubPub) ->
+    {error, no_binding_signature};
+verify_binding([#{body := Body} | Rest], Prefix, PrimaryPub, SubPub) ->
+    case openpgp_detached_sig:verify_key_signature(Prefix, Body, PrimaryPub, [16#18]) of
+        {ok, #{hashed_sub := Hashed, unhashed_sub := Unhashed}} ->
+            Flags = subkey_flags_from_subpackets(Hashed),
+            Signing = is_integer(Flags) andalso (Flags band 16#02) =:= 16#02,
+            case Signing of
+                false ->
+                    {ok, Flags};
+                true ->
+                    Embedded = [D || {32, D} <- openpgp_detached_sig:sig_subpackets(Hashed) ++
+                        openpgp_detached_sig:sig_subpackets(Unhashed)],
+                    case [R || D <- Embedded, {ok, _} = R <- [openpgp_detached_sig:verify_key_signature(Prefix, D, SubPub, [16#19])]] of
+                        [_ | _] -> {ok, Flags};
+                        [] when Embedded =:= [] -> {error, missing_back_signature};
+                        [] -> {error, invalid_back_signature}
+                    end
+            end;
+        {error, _} when Rest =/= [] ->
+            verify_binding(Rest, Prefix, PrimaryPub, SubPub);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+names_issuer(SigBody, #{fpr := Fpr, keyid := KeyId}) ->
+    case parse_v4_sig_info(SigBody) of
+        {ok, #{hashed_sub := Hashed, unhashed_sub := Unhashed}} ->
+            Named = [D || {33, D} <- openpgp_detached_sig:sig_subpackets(Hashed)] ++
+                [D || {16, D} <- openpgp_detached_sig:sig_subpackets(Hashed) ++ openpgp_detached_sig:sig_subpackets(Unhashed)],
+            %% An unnamed issuer is taken to be the primary key, as GnuPG does.
+            Named =:= [] orelse lists:any(fun(<<4:8, F/binary>>) -> F =:= Fpr; (Id) -> Id =:= KeyId end, Named);
+        _ ->
+            false
+    end.
+
+pubkey_prefix(PubKeyBody) ->
+    Len = byte_size(PubKeyBody),
+    <<16#99:8, Len:16/big-unsigned, PubKeyBody/binary>>.
+
+userid_prefix(UserId) ->
+    Len = byte_size(UserId),
+    <<16#B4:8, Len:32/big-unsigned, UserId/binary>>.
+
 %% @doc Like `import_public_bundle/1`, but converts `primary` and each subkey `pub`
 %% into `public_key` record/tuple formats (`#'RSAPublicKey'{}` / `{#'ECPoint'{}, Params}`).
 -spec import_public_bundle_key(iodata() | binary()) ->
@@ -215,6 +333,7 @@ import_public_bundle(Input) ->
             primary_keyid := binary(),
             primary_created := non_neg_integer(),
             userids := [binary()],
+            self_certified := boolean(),
             subkeys := [
                 #{
                     pub := public_key_pub(),
@@ -703,39 +822,6 @@ parse_public_key_body(<<4:8, _Created:32/big-unsigned, 22:8, OidLen:8, Oid:OidLe
 parse_public_key_body(_Other) ->
     {error, unsupported_public_key_format}.
 
-parse_subkeys(Packets) ->
-    parse_subkeys(Packets, []).
-
-parse_subkeys([], Acc) ->
-    lists:reverse(Acc);
-parse_subkeys([#{tag := 14, body := SubBody} | Rest], Acc) ->
-    % Try to find an immediate following subkey binding signature (0x18)
-    {Flags, Rest2} =
-        case Rest of
-            [#{tag := 2, body := SigBody} | Tail] ->
-                case parse_v4_sig_info(SigBody) of
-                    {ok, #{sig_type := 16#18, hashed_sub := HashedSub}} ->
-                        {subkey_flags_from_subpackets(HashedSub), Tail};
-                    _ ->
-                        {undefined, Rest}
-                end;
-            _ ->
-                {undefined, Rest}
-        end,
-    case public_key_body_info(SubBody) of
-        {ok, #{created := Created, fingerprint := Fpr, keyid := KeyId}} ->
-            case parse_public_key_body(SubBody) of
-                {ok, Pub} ->
-                    parse_subkeys(Rest2, [#{pub => Pub, fpr => Fpr, keyid => KeyId, created => Created, flags => Flags} | Acc]);
-                _ ->
-                    parse_subkeys(Rest2, Acc)
-            end;
-        _ ->
-            parse_subkeys(Rest2, Acc)
-    end;
-parse_subkeys([_Other | Rest], Acc) ->
-    parse_subkeys(Rest, Acc).
-
 parse_v4_sig_info(
     <<4:8, SigType:8, PkAlgId:8, HashAlgId:8, HashedLen:16/big-unsigned, Hashed:HashedLen/binary,
       UnhashedLen:16/big-unsigned, Unhashed:UnhashedLen/binary, _Hash16:2/binary, _Rest/binary>>
@@ -745,27 +831,9 @@ parse_v4_sig_info(_Other) ->
     {error, bad_signature_packet}.
 
 subkey_flags_from_subpackets(Subpackets) when is_binary(Subpackets) ->
-    case find_sig_subpacket(27, Subpackets) of
+    case openpgp_detached_sig:sig_subpacket(27, Subpackets) of
         {ok, <<Flags:8, _/binary>>} -> Flags;
-        {ok, <<>>} -> undefined;
-        error -> undefined
-    end.
-
-find_sig_subpacket(Type, Bin) when is_integer(Type), is_binary(Bin) ->
-    find_sig_subpacket(Type, Bin, error).
-
-find_sig_subpacket(_Type, <<>>, Default) ->
-    Default;
-find_sig_subpacket(Type, <<Len:8, T:8, Rest/binary>>, Default) when Len >= 1 ->
-    DataLen = Len - 1,
-    case Rest of
-        <<Data:DataLen/binary, Tail/binary>> ->
-            case T =:= Type of
-                true -> {ok, Data};
-                false -> find_sig_subpacket(Type, Tail, Default)
-            end;
-        _ ->
-            Default
+        _ -> undefined
     end.
 
 %% Internal: build a v4 Public-Key packet body from OTP crypto pubkey formats.
@@ -1184,7 +1252,7 @@ ed25519_from_ecprivate_tuple_fields(PrivField, PubField) ->
                     undefined ->
                         % Derive pub from priv if possible
                         try crypto:generate_key(eddsa, ed25519, Priv32) of
-                            P2 -> P2
+                            {P2, _} -> P2
                         catch _:_ ->
                             error({missing_ed25519_public})
                         end;

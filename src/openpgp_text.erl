@@ -1,20 +1,31 @@
 %%% @doc Helpers for OpenPGP "canonical text" processing and cleartext dash-escaping.
 -module(openpgp_text).
 
--export([canonicalize_text/1, dash_escape/1, dash_unescape/1]).
+-export([canonicalize_text/1, strip_trailing_whitespace/1, dash_escape/1, dash_unescape/1]).
 
 %% @doc Canonicalize text for OpenPGP text signatures (sigtype 0x01).
 %%
-%% - Convert line endings to CRLF
-%% - Strip trailing spaces/tabs at end of each line
-%% - Preserve whether the input ended with a newline (i.e. final empty line)
+%% RFC 4880 5.2.1: a canonical text document has its line endings converted
+%% to CRLF, and nothing else. Trailing whitespace is left alone; stripping it
+%% belongs to the cleartext signature framework only (see
+%% `strip_trailing_whitespace/1`), and doing it here made detached text
+%% signatures disagree with GnuPG whenever a line ended in a space or tab.
 -spec canonicalize_text(iodata() | binary()) -> binary().
 canonicalize_text(Text0) ->
     Text = iolist_to_binary(Text0),
     Lines0 = binary:split(Text, <<"\n">>, [global]),
     Lines1 = [trim_cr(L) || L <- Lines0],
-    Lines2 = [rstrip_ws(L) || L <- Lines1],
-    iolist_to_binary(join_crlf(Lines2)).
+    iolist_to_binary(join_crlf(Lines1)).
+
+%% @doc Remove trailing spaces and tabs from every line (RFC 4880 7.1).
+%%
+%% Used by the cleartext signature framework, where the signed text is the
+%% cleartext with trailing whitespace removed from each line.
+-spec strip_trailing_whitespace(iodata() | binary()) -> binary().
+strip_trailing_whitespace(Text0) ->
+    Text = iolist_to_binary(Text0),
+    Lines0 = binary:split(Text, <<"\n">>, [global]),
+    iolist_to_binary(join_lf([rstrip_ws(trim_cr(L)) || L <- Lines0])).
 
 trim_cr(Bin) when is_binary(Bin) ->
     case byte_size(Bin) of
