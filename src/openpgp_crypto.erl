@@ -288,15 +288,16 @@ verify_certifications(Sigs, Prefix, PrimaryPub, Issuer) ->
             end
     end.
 
-%% The primary key must bind the subkey (0x18). If the binding grants the
-%% signing flag, the subkey must bind the primary back (0x19) inside it.
+%% The primary key must bind the subkey (0x18). Unless the binding's key
+%% flags rule out signing, the subkey must bind the primary back (0x19)
+%% inside it.
 verify_binding([], _Prefix, _PrimaryPub, _SubPub) ->
     {error, no_binding_signature};
 verify_binding([#{body := Body} | Rest], Prefix, PrimaryPub, SubPub) ->
     case openpgp_detached_sig:verify_key_signature(Prefix, Body, PrimaryPub, [16#18]) of
         {ok, #{hashed_sub := Hashed, unhashed_sub := Unhashed}} ->
             Flags = subkey_flags_from_subpackets(Hashed),
-            Signing = is_integer(Flags) andalso (Flags band 16#02) =:= 16#02,
+            Signing = Flags =:= undefined orelse (Flags band 16#02) =:= 16#02,
             case Signing of
                 false ->
                     {ok, Flags};

@@ -331,10 +331,10 @@ bundle() ->
              subkey_signing_key => PrivS, subkey_flags => 16#02},
     {ok, Armored, _} = openpgp_crypto:export_public_with_subkey({ed25519, PubP}, {ed25519, PubS}, Opts),
     {ok, #{packets := Packets}} = gpg_keys:decode(Armored),
-    {Packets, PubS}.
+    {Packets, PubS, PrivP, PrivS}.
 
 bundle_import_verifies_bindings_test() ->
-    {Packets, PubS} = bundle(),
+    {Packets, PubS, _, _} = bundle(),
     {ok, #{self_certified := true, subkeys := [Sub]}} =
         openpgp_crypto:import_public_bundle(openpgp_packets:encode(Packets)),
     ?assertEqual({ed25519, PubS}, maps:get(pub, Sub)),
@@ -357,6 +357,28 @@ bundle_import_verifies_bindings_test() ->
     BadSelf = SelfSig#{body => <<SB1/binary, 0:8, SBRest/binary>>},
     ?assertMatch({error, {invalid_self_certification, _, _}},
                  openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, BadSelf, SubPkt, Binding]))).
+
+%% A subkey that may sign, by its flags or for want of any, needs a valid
+%% back signature; one whose flags rule out signing does not.
+bundle_import_requires_back_signature_test() ->
+    {[Prim, Uid, SelfSig, SubPkt, _], _, PrivP, PrivS} = bundle(),
+    PrimBody = maps:get(body, Prim),
+    SubBody = maps:get(body, SubPkt),
+    {_, PrivOther} = crypto:generate_key(eddsa, ed25519),
+    BackSig = fun(Priv) ->
+        #{packet := #{body := B}} = openpgp_sig:primary_key_binding(ed25519, #{priv => Priv}, PrimBody, SubBody),
+        B
+    end,
+    Import = fun(BindOpts) ->
+        #{packet := Binding} = openpgp_sig:subkey_binding(ed25519, #{priv => PrivP}, PrimBody, SubBody, BindOpts),
+        openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, SelfSig, SubPkt, Binding]))
+    end,
+    ?assertMatch({error, {unbound_subkey, _, missing_back_signature}}, Import(#{subkey_flags => 16#02})),
+    ?assertMatch({error, {unbound_subkey, _, missing_back_signature}}, Import(#{})),
+    ?assertMatch({error, {unbound_subkey, _, invalid_back_signature}},
+                 Import(#{subkey_flags => 16#02, embedded_sig_body => BackSig(PrivOther)})),
+    ?assertMatch({ok, #{subkeys := [#{flags := undefined}]}}, Import(#{embedded_sig_body => BackSig(PrivS)})),
+    ?assertMatch({ok, #{subkeys := [#{flags := 16#0C}]}}, Import(#{subkey_flags => 16#0C})).
 
 ed25519_private_tuple_without_public_test() ->
     {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
