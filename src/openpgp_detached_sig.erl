@@ -25,6 +25,8 @@
     parse_signature/1,
     sig_subpackets/1,
     sig_subpacket/2,
+    named_issuers/2,
+    is_issuer/2,
     hash_alg/1
 ]).
 
@@ -371,19 +373,27 @@ check_issuer(HashedSubs, UnhashedSubs, Opts) ->
         error ->
             ok;
         {ok, Fpr} when is_binary(Fpr), byte_size(Fpr) =:= 20 ->
-            KeyId = openpgp_fingerprint:keyid_from_fingerprint(Fpr),
-            Named = [D || {33, D} <- HashedSubs] ++ [D || {16, D} <- HashedSubs ++ UnhashedSubs],
-            Matches = fun
-                (<<4:8, F/binary>>) -> F =:= Fpr;
-                (Id) -> Id =:= KeyId
-            end,
-            case Named =:= [] orelse lists:all(Matches, Named) of
+            Named = named_issuers(HashedSubs, UnhashedSubs),
+            case Named =:= [] orelse lists:all(fun(N) -> is_issuer(N, Fpr) end, Named) of
                 true -> ok;
                 false -> bad_sig(issuer_mismatch)
             end;
         {ok, Other} ->
             {error, {bad_issuer_fpr, Other}}
     end.
+
+%% @doc Issuer subpackets of a signature: fingerprints (33) from the hashed
+%% area, key ids (16) from either area.
+-spec named_issuers([{non_neg_integer(), binary()}], [{non_neg_integer(), binary()}]) ->
+    [{16 | 33, binary()}].
+named_issuers(HashedSubs, UnhashedSubs) ->
+    [S || {33, _} = S <- HashedSubs] ++ [S || {16, _} = S <- HashedSubs ++ UnhashedSubs].
+
+-spec is_issuer({16 | 33, binary()}, binary()) -> boolean().
+is_issuer({33, Data}, Fpr) ->
+    Data =:= <<4:8, Fpr/binary>>;
+is_issuer({16, KeyId}, Fpr) ->
+    KeyId =:= openpgp_fingerprint:keyid_from_fingerprint(Fpr).
 
 verify_hash_and_sig(Prefix, Info, PubKey) ->
     HashedSub = maps:get(hashed_sub, Info),

@@ -298,6 +298,23 @@ verification_checks_test() ->
     ?assertMatch({error, #{detail := signature_from_the_future}},
                  openpgp_detached_sig:verify(Data, Sig2, {ed25519, Pub}, #{now => Now})).
 
+%% A key id (subpacket 16) starting with 0x04 is not mistaken for a v4 fingerprint.
+issuer_keyid_with_0x04_prefix_test() ->
+    Fpr = <<0:96, 4, 1, 2, 3, 4, 5, 6, 7>>,
+    ?assert(openpgp_detached_sig:is_issuer({16, <<4, 1, 2, 3, 4, 5, 6, 7>>}, Fpr)),
+    ?assert(openpgp_detached_sig:is_issuer({33, <<4, Fpr/binary>>}, Fpr)),
+    ?assertNot(openpgp_detached_sig:is_issuer({33, <<4, 1, 2, 3, 4, 5, 6, 7>>}, Fpr)),
+    {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
+    {Created, KeyFpr} = keyid_0x04_fingerprint({ed25519, Pub}, 1700000000),
+    {ok, Sig} = openpgp_detached_sig:sign(<<"x">>, {ed25519, Priv}, #{created => Created, issuer_fpr => KeyFpr}),
+    ?assertEqual(ok, openpgp_detached_sig:verify(<<"x">>, Sig, {ed25519, Pub}, #{issuer_fpr => KeyFpr})).
+
+keyid_0x04_fingerprint(Pub, Created) ->
+    case openpgp_crypto:fingerprint(Pub, Created) of
+        {ok, <<_:12/binary, 4, _/binary>> = Fpr} -> {Created, Fpr};
+        {ok, _} -> keyid_0x04_fingerprint(Pub, Created + 1)
+    end.
+
 subpacket_lengths_test() ->
     Big = binary:copy(<<$x>>, 300),
     %% 2-octet length form for a 301-byte subpacket, then a 1-octet one

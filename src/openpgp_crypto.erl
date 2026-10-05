@@ -315,13 +315,13 @@ verify_binding([#{body := Body} | Rest], Prefix, PrimaryPub, SubPub) ->
             {error, Reason}
     end.
 
-names_issuer(SigBody, #{fpr := Fpr, keyid := KeyId}) ->
+names_issuer(SigBody, #{fpr := Fpr}) ->
     case parse_v4_sig_info(SigBody) of
         {ok, #{hashed_sub := Hashed, unhashed_sub := Unhashed}} ->
-            Named = [D || {33, D} <- openpgp_detached_sig:sig_subpackets(Hashed)] ++
-                [D || {16, D} <- openpgp_detached_sig:sig_subpackets(Hashed) ++ openpgp_detached_sig:sig_subpackets(Unhashed)],
+            Named = openpgp_detached_sig:named_issuers(openpgp_detached_sig:sig_subpackets(Hashed),
+                                                       openpgp_detached_sig:sig_subpackets(Unhashed)),
             %% An unnamed issuer is taken to be the primary key, as GnuPG does.
-            Named =:= [] orelse lists:any(fun(<<4:8, F/binary>>) -> F =:= Fpr; (Id) -> Id =:= KeyId end, Named);
+            Named =:= [] orelse lists:any(fun(N) -> openpgp_detached_sig:is_issuer(N, Fpr) end, Named);
         _ ->
             false
     end.
