@@ -50,7 +50,9 @@ gpg_tests() ->
         {"sign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_sign_erlang_verify/0},
         {"clearsign in Erlang and verify with gpg (RSA/Ed25519)", fun erlang_clearsign_gpg_verify/0},
         {"clearsign in gpg and verify in Erlang (RSA/Ed25519)", fun gpg_clearsign_erlang_verify/0},
-        {"export secret key from crypto-format and import into gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0}
+        {"export secret key from crypto-format and import into gpg (RSA/Ed25519)", fun crypto_to_gpg_secret/0},
+        {"gpg revocations, expirations and SHA-224 certifications on import", fun gpg_key_validity/0},
+        {"gpg secret key block import (RSA/Ed25519)", fun gpg_secret_key_import/0}
     ].
 
 should_run_gpg_tests() ->
@@ -678,6 +680,83 @@ gen_key(Home, ed25519, Email) ->
                 _ -> {skip, "GnuPG does not appear to support Ed25519 key generation in batch mode in this environment"}
             end
     end.
+
+gpg_key_validity() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+        Email = "validity@example.com",
+        ok = gen_key_signing_subkey(Home, rsa, Email),
+        [Fpr, SubFpr] = gpg_fprs(Home, Email),
+        Import = fun(Opts) ->
+            {ok, Armored} = gpg_export_public(Home, Email),
+            openpgp_crypto:import_public_bundle(Armored, Opts)
+        end,
+        Now = erlang:system_time(second),
+        ?assertMatch({ok, #{subkeys := [_], userids := [_]}}, Import(#{})),
+
+        %% a second User ID certified with SHA-224, then the first one revoked
+        Uid2 = "Second <second@example.com>",
+        {ok, _} = gpg(Home, ["--batch", "--yes", "--cert-digest-algo", "SHA224", "--quick-add-uid", Fpr, Uid2]),
+        ?assertMatch({ok, #{userids := [_, _]}}, Import(#{})),
+        {ok, _} = gpg(Home, ["--batch", "--yes", "--quick-revoke-uid", Fpr, "Test RSA Subkey <" ++ Email ++ ">"]),
+        ?assertMatch({ok, #{userids := [<<"Second <second@example.com>">>]}}, Import(#{})),
+
+        %% the subkey expires in a day
+        {ok, _} = gpg(Home, ["--batch", "--yes", "--quick-set-expire", Fpr, "1d", SubFpr]),
+        ?assertMatch({ok, #{subkeys := [#{expires := _}]}}, Import(#{now => Now})),
+        ?assertMatch({ok, #{subkeys := [], rejected_subkeys := [#{reason := expired}]}},
+                     Import(#{now => Now + 2 * 86400})),
+
+        %% the primary key expires in a day
+        {ok, _} = gpg(Home, ["--batch", "--yes", "--quick-set-expire", Fpr, "1d"]),
+        ?assertMatch({ok, #{primary_expires := _}}, Import(#{now => Now})),
+        ?assertEqual({error, key_expired}, Import(#{now => Now + 2 * 86400})),
+
+        %% the revocation certificate gpg made with the key
+        RevPath = filename:join([Home, "openpgp-revocs.d", Fpr ++ ".rev"]),
+        {ok, Rev0} = file:read_file(RevPath),
+        Rev = binary:replace(Rev0, <<":-----BEGIN">>, <<"-----BEGIN">>),
+        ok = file:write_file(RevPath, Rev),
+        {ok, _} = gpg(Home, ["--batch", "--yes", "--import", RevPath]),
+        ?assertEqual({error, key_revoked}, Import(#{}))
+    after
+        Cleanup()
+    end.
+
+gpg_secret_key_import() ->
+    {Tmp, Cleanup} = mktemp_dir(),
+    try
+        Home = filename:join(Tmp, "home"),
+        ok = file:make_dir(Home),
+        ok = file:change_mode(Home, 8#700),
+        lists:foreach(
+            fun({Type, Email}) ->
+                ok = gen_key_signing_subkey(Home, Type, Email),
+                {ok, Secret} = gpg(Home, ["--batch", "--yes", "--armor", "--export-secret-keys", Email]),
+                {ok, Public} = gpg_export_public(Home, Email),
+                {ok, #{public := Pub, secret := Priv}} = openpgp_crypto:import_keypair(Secret),
+                ?assertEqual(openpgp_crypto:import_public(Public), {ok, Pub}),
+                SignKey =
+                    case Priv of
+                        {rsa, P} -> {rsa, P};
+                        {ed25519, {_, P}} -> {ed25519, P}
+                    end,
+                {ok, Sig} = openpgp_detached_sig:sign(<<"d">>, SignKey, #{}),
+                ?assertEqual(ok, openpgp_detached_sig:verify(<<"d">>, Sig, Pub))
+            end,
+            [{rsa, "secret-rsa@example.com"}, {ed25519, "secret-ed@example.com"}]
+        )
+    after
+        Cleanup()
+    end.
+
+gpg_fprs(Home, Email) ->
+    {ok, Out} = gpg(Home, ["--batch", "--yes", "--with-colons", "--fingerprint", "--fingerprint", Email]),
+    [binary_to_list(lists:nth(10, binary:split(L, <<":">>, [global])))
+     || L <- binary:split(Out, <<"\n">>, [global]), binary:match(L, <<"fpr:">>) =:= {0, 4}].
 
 gen_key_signing_subkey(Home, rsa, Email) ->
     % Primary: cert-only. Subkey: signing.

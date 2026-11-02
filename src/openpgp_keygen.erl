@@ -88,7 +88,12 @@ ed25519(UserId0) ->
 rsa_pub_parts([E, N]) when is_binary(E), is_binary(N) -> {E, N};
 rsa_pub_parts([E, N | _]) -> {E, N}.
 
-rsa_priv_parts([_E, _N, D, P, Q | _]) -> {D, P, Q}.
+%% OpenPGP has p < q (RFC 4880 5.5.3), OTP p > q.
+rsa_priv_parts([_E, _N, D, P, Q | _]) ->
+    case binary:decode_unsigned(P) < binary:decode_unsigned(Q) of
+        true -> {D, P, Q};
+        false -> {D, Q, P}
+    end.
 
 rsa_u(Pbin, Qbin) ->
     P = binary:decode_unsigned(Pbin),

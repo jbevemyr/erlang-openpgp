@@ -22,6 +22,7 @@
     verify_key/3,
     verify_key/4,
     verify_key_signature/4,
+    verify_key_signature/5,
     parse_signature/1,
     sig_subpackets/1,
     sig_subpacket/2,
@@ -41,12 +42,15 @@
 %% - issuer_fpr: when the signature names an issuer (subpacket 33 or 16) it
 %%   must be this key.
 %% - key_created: the signature must not predate the key.
+%% - key_expires: when the key expires (Unix seconds); a signature made at or
+%%   after it is rejected.
 %% - now: reference time for creation and expiration checks (default: the
 %%   system clock).
 -type verify_opts() :: #{
     sig_type => 16#00 | 16#01,
     issuer_fpr => binary(),
     key_created => non_neg_integer(),
+    key_expires => non_neg_integer(),
     now => non_neg_integer()
 }.
 
@@ -61,8 +65,14 @@
     hashed_sub := binary(),
     unhashed_sub := binary(),
     hash16 := binary(),
-    mpis := [binary()]
+    mpis := [binary()],
+    created => non_neg_integer()
 }.
+
+%% Subpackets that are either checked here or in openpgp_crypto, or carry
+%% nothing that could restrict the signature's validity. A critical subpacket
+%% of any other type invalidates the signature (RFC 4880 5.2.3.1).
+-define(KNOWN_SUBPACKETS, [2, 3, 4, 7, 9, 11, 16, 21, 22, 23, 25, 27, 28, 29, 30, 32, 33]).
 
 %% @doc Create a detached signature for Data.
 %%
@@ -159,6 +169,10 @@ sign_key(Data, KeyAny, Opts) ->
 
 %% @doc Verify a detached signature for Data with a public key in OTP crypto-format.
 %%
+%% The signature block may hold several signatures, e.g. by different keys;
+%% it verifies when one of them does. Otherwise the error is that of the
+%% first one.
+%%
 %% `PubKey`:
 %% - `{rsa, [E,N]}`
 %% - `{ed25519, Pub32}`
@@ -172,15 +186,28 @@ verify(Data0, Sig0, PubKey, Opts) ->
     guarded(fun() ->
         Data = iolist_to_binary(Data0),
         case openpgp_packets:decode(unarmor(Sig0)) of
-            {ok, [#{tag := 2, body := Body} | _]} ->
-                case parse_signature_body(Body) of
-                    {ok, Info} -> verify_with_info(Data, Info, PubKey, Opts);
-                    {error, _} -> malformed_sig()
+            {ok, [_ | _] = Packets} ->
+                case lists:all(fun(#{tag := T}) -> T =:= 2 end, Packets) of
+                    true -> verify_any(Data, [B || #{body := B} <- Packets], PubKey, Opts, []);
+                    false -> malformed_sig()
                 end;
             _ ->
                 malformed_sig()
         end
     end).
+
+verify_any(_Data, [], _PubKey, _Opts, Errors) ->
+    lists:last(Errors);
+verify_any(Data, [Body | Rest], PubKey, Opts, Errors) ->
+    Result =
+        case parse_signature_body(Body) of
+            {ok, Info} -> verify_with_info(Data, Info, PubKey, Opts);
+            {error, _} -> malformed_sig()
+        end,
+    case Result of
+        ok -> ok;
+        {error, _} = Err -> verify_any(Data, Rest, PubKey, Opts, [Err | Errors])
+    end.
 
 %% @doc Like `verify/3`, but also accepts common `public_key` key formats:
 %% - `#'RSAPublicKey'{...}` or `#'RSAPrivateKey'{...}` (public fields used)
@@ -204,11 +231,20 @@ verify_key(Data, Sig, KeyAny, Opts) ->
 %% 0x99-framed public key body, followed by the 0xB4-framed User ID for
 %% certifications or the 0x99-framed subkey body for bindings. `SigBody` is
 %% the Signature packet body. `AllowedTypes` lists the signature types the
-%% caller accepts. Returns the parsed signature on success, so the caller can
-%% read its subpackets.
+%% caller accepts. Returns the parsed signature on success, with its creation
+%% time as `created`, so the caller can read its subpackets.
+%%
+%% The subpackets are checked as for documents (`now` and `key_created` in
+%% `Opts`); key expiration is left to the caller, which knows the key's
+%% self-signatures.
 -spec verify_key_signature(binary(), binary(), pubkey(), [non_neg_integer()]) ->
     {ok, sig_info()} | {error, term()}.
 verify_key_signature(Prefix, SigBody, PubKey, AllowedTypes) ->
+    verify_key_signature(Prefix, SigBody, PubKey, AllowedTypes, #{}).
+
+-spec verify_key_signature(binary(), binary(), pubkey(), [non_neg_integer()], verify_opts()) ->
+    {ok, sig_info()} | {error, term()}.
+verify_key_signature(Prefix, SigBody, PubKey, AllowedTypes, Opts) ->
     guarded(fun() ->
         case parse_signature_body(SigBody) of
             {ok, #{sig_type := SigType} = Info} ->
@@ -216,9 +252,14 @@ verify_key_signature(Prefix, SigBody, PubKey, AllowedTypes) ->
                     false ->
                         {error, {unexpected_sig_type, SigType}};
                     true ->
-                        case verify_hash_and_sig(Prefix, Info, PubKey) of
-                            ok -> {ok, Info};
-                            {error, _} = Err -> Err
+                        case check_subpackets(Info, Opts) of
+                            {ok, Created} ->
+                                case verify_hash_and_sig(Prefix, Info, PubKey) of
+                                    ok -> {ok, Info#{created => Created}};
+                                    {error, _} = Err -> Err
+                                end;
+                            {error, _} = Err ->
+                                Err
                         end
                 end;
             {error, _} ->
@@ -245,7 +286,8 @@ parse_signature(Sig0) ->
 %%
 %% Handles the 1-, 2- and 5-octet length forms (RFC 4880 5.2.3.1) and masks
 %% the critical bit off the type. A truncated area yields what was decoded
-%% before the truncation.
+%% before the truncation; verification rejects such a signature, so the
+%% areas of a verified signature decode in full.
 -spec sig_subpackets(binary()) -> [{non_neg_integer(), binary()}].
 sig_subpackets(Bin) ->
     sig_subpackets(Bin, []).
@@ -266,10 +308,11 @@ sig_subpackets(Bin, Acc) ->
             lists:reverse(Acc)
     end.
 
-%% @doc The data of the first subpacket of the given type, if any.
+%% @doc The data of the last subpacket of the given type, if any: of
+%% conflicting subpackets the last one wins (RFC 4880 5.2.4.1).
 -spec sig_subpacket(non_neg_integer(), binary()) -> {ok, binary()} | error.
 sig_subpacket(Type, Bin) ->
-    case lists:keyfind(Type, 1, sig_subpackets(Bin)) of
+    case lists:keyfind(Type, 1, lists:reverse(sig_subpackets(Bin))) of
         {Type, Data} -> {ok, Data};
         false -> error
     end.
@@ -310,7 +353,7 @@ verify_with_info(Data, Info, PubKey, Opts) ->
             case check_subpackets(Info, Opts) of
                 {error, _} = E1 ->
                     E1;
-                ok ->
+                {ok, _Created} ->
                     Data2 =
                         case SigType of
                             16#00 -> Data;
@@ -329,20 +372,57 @@ check_sig_type(SigType, Opts) ->
     end.
 
 %% Creation time is mandatory in a v4 signature. A signature made before its
-%% key existed, or from the future, or past its own expiration, is rejected.
-%% An issuer named by the signature must be the key we verify with.
+%% key existed, or from the future, or past its own expiration or its key's,
+%% is rejected. An issuer named by the signature must be the key we verify
+%% with. Returns the creation time.
 check_subpackets(#{hashed_sub := Hashed, unhashed_sub := Unhashed}, Opts) ->
-    HashedSubs = sig_subpackets(Hashed),
-    Now = maps:get(now, Opts, erlang:system_time(second)),
-    case lists:keyfind(2, 1, HashedSubs) of
-        {2, <<Created:32/big-unsigned>>} ->
-            run_checks([
-                fun() -> check_created(Created, Now, Opts) end,
-                fun() -> check_expiration(Created, Now, HashedSubs) end,
-                fun() -> check_issuer(HashedSubs, sig_subpackets(Unhashed), Opts) end
-            ]);
+    case {decode_subpackets(Hashed), decode_subpackets(Unhashed)} of
+        {{ok, HashedSubs0}, {ok, UnhashedSubs0}} ->
+            HashedSubs = [{T, D} || {_, T, D} <- HashedSubs0],
+            UnhashedSubs = [{T, D} || {_, T, D} <- UnhashedSubs0],
+            Now = maps:get(now, Opts, erlang:system_time(second)),
+            case lists:keyfind(2, 1, lists:reverse(HashedSubs)) of
+                {2, <<Created:32/big-unsigned>>} ->
+                    Checks = run_checks([
+                        fun() -> check_critical(HashedSubs0) end,
+                        fun() -> check_created(Created, Now, Opts) end,
+                        fun() -> check_expiration(Created, Now, HashedSubs) end,
+                        fun() -> check_issuer(HashedSubs, UnhashedSubs, Opts) end
+                    ]),
+                    case Checks of
+                        ok -> {ok, Created};
+                        {error, _} = Err -> Err
+                    end;
+                _ ->
+                    bad_sig(missing_creation_time)
+            end;
         _ ->
-            bad_sig(missing_creation_time)
+            malformed_sig()
+    end.
+
+decode_subpackets(Bin) ->
+    decode_subpackets(Bin, []).
+
+decode_subpackets(<<>>, Acc) ->
+    {ok, lists:reverse(Acc)};
+decode_subpackets(Bin, Acc) ->
+    case subpacket_len(Bin) of
+        {ok, Len, <<Critical:1, T:7, Rest/binary>>} when Len >= 1 ->
+            DataLen = Len - 1,
+            case Rest of
+                <<Data:DataLen/binary, Tail/binary>> ->
+                    decode_subpackets(Tail, [{Critical =:= 1, T, Data} | Acc]);
+                _ ->
+                    error
+            end;
+        _ ->
+            error
+    end.
+
+check_critical(Subs) ->
+    case [T || {true, T, _} <- Subs, not lists:member(T, ?KNOWN_SUBPACKETS)] of
+        [] -> ok;
+        [T | _] -> bad_sig({unknown_critical_subpacket, T})
     end.
 
 run_checks([]) ->
@@ -355,14 +435,16 @@ run_checks([F | T]) ->
 
 check_created(Created, Now, Opts) ->
     KeyCreated = maps:get(key_created, Opts, 0),
+    KeyExpires = maps:get(key_expires, Opts, infinity),
     if
         Created < KeyCreated -> bad_sig(signature_predates_key);
         Created > Now + ?SKEW -> bad_sig(signature_from_the_future);
+        is_integer(KeyExpires), Created >= KeyExpires -> bad_sig(key_expired);
         true -> ok
     end.
 
 check_expiration(Created, Now, HashedSubs) ->
-    case lists:keyfind(3, 1, HashedSubs) of
+    case lists:keyfind(3, 1, lists:reverse(HashedSubs)) of
         {3, <<0:32>>} -> ok;
         {3, <<Lifetime:32/big-unsigned>>} when Now > Created + Lifetime -> bad_sig(signature_expired);
         _ -> ok
@@ -424,9 +506,16 @@ verify_hash_and_sig(Prefix, Info, PubKey) ->
                         {1, {rsa, [E, N]}, [SigMpi]} ->
                             case openpgp_mpi:decode_one(SigMpi) of
                                 {ok, {_Bits, SigBin, <<>>}} ->
-                                    case crypto:verify(rsa, HashCrypto, HashData, SigBin, [E, N]) of
-                                        true -> ok;
-                                        false -> bad_sig()
+                                    %% OpenSSL wants the signature as long as the
+                                    %% modulus, the MPI has its leading zeros stripped.
+                                    case left_pad(SigBin, byte_size(strip_zeros(N))) of
+                                        {ok, SigBinN} ->
+                                            case crypto:verify(rsa, HashCrypto, HashData, SigBinN, [E, N]) of
+                                                true -> ok;
+                                                false -> bad_sig()
+                                            end;
+                                        error ->
+                                            bad_sig()
                                     end;
                                 _ ->
                                     malformed_sig()
@@ -435,7 +524,7 @@ verify_hash_and_sig(Prefix, Info, PubKey) ->
                           when is_binary(Pub32), byte_size(Pub32) =:= 32 ->
                             {ok, {_RB, R, <<>>}} = openpgp_mpi:decode_one(RMpi),
                             {ok, {_SB, S, <<>>}} = openpgp_mpi:decode_one(SMpi),
-                            Sig = <<(pad32(R))/binary, (pad32(S))/binary>>,
+                            Sig = <<(pad32(strip_zeros(R)))/binary, (pad32(strip_zeros(S)))/binary>>,
                             case crypto:verify(eddsa, none, Digest, Sig, [Pub32, ed25519]) of
                                 true -> ok;
                                 false -> bad_sig()
@@ -535,10 +624,24 @@ hash_alg(sha384) -> {9, sha384};
 hash_alg(sha512) -> {10, sha512};
 hash_alg(Other) -> {error, {unsupported_hash, Other}}.
 
+%% SHA-1 (2), MD5 (1) and RIPEMD-160 (3) are not accepted on verification
+%% either (RFC 9580 9.5).
 hash_alg_id(8) -> {sha256, <<"SHA256">>};
 hash_alg_id(9) -> {sha384, <<"SHA384">>};
 hash_alg_id(10) -> {sha512, <<"SHA512">>};
+hash_alg_id(11) -> {sha224, <<"SHA224">>};
+hash_alg_id(12) -> {sha3_256, <<"SHA3-256">>};
+hash_alg_id(14) -> {sha3_512, <<"SHA3-512">>};
 hash_alg_id(Other) -> {error, {unsupported_hash_alg, Other}}.
+
+strip_zeros(<<0, Rest/binary>>) -> strip_zeros(Rest);
+strip_zeros(Bin) -> Bin.
+
+left_pad(Bin, Size) when byte_size(Bin) =< Size ->
+    Pad = Size - byte_size(Bin),
+    {ok, <<0:Pad/unit:8, Bin/binary>>};
+left_pad(_Bin, _Size) ->
+    error.
 
 pad32(Bin) when is_binary(Bin), byte_size(Bin) =:= 32 -> Bin;
 pad32(Bin) when is_binary(Bin), byte_size(Bin) < 32 ->

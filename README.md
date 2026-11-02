@@ -38,7 +38,7 @@ Import a public key from GPG/OpenPGP into crypto format:
 {ok, {ed25519, Pub32}} = openpgp_crypto:import_public(ArmoredOrBinary).
 ```
 
-Import an (unencrypted) secret key if present:
+Import an (unencrypted) secret key if present, from a public or a secret keyblock:
 
 ```erlang
 {ok, #{public := Pub, secret := SecretOrUndefined}} = openpgp_crypto:import_keypair(ArmoredOrBinary).
@@ -109,6 +109,14 @@ Subkeys = maps:get(subkeys, Bundle),
 [#{pub := {ed25519, SubPub32}}] = [S || S <- Subkeys, maps:get(fpr, S) =:= SubFpr],
 ok = openpgp_detached_sig:verify(Data, SigArmored, {ed25519, SubPub32}).
 ```
+
+The import checks the signatures that hold the keyblock together, as GnuPG
+does: a revoked or expired primary key is an error, `userids` holds only User
+IDs with a valid self-certification that has not been revoked (the primary
+one first), and `subkeys` only subkeys with a valid binding (and back
+signature, for signing subkeys) that are neither revoked nor expired. The
+other subkeys are listed in `rejected_subkeys` with the reason. Signatures
+by other keys, and signatures that do not verify, are ignored.
 
 If you know the subkey **keyid**, you can look up the subkey public key directly:
 
@@ -189,6 +197,13 @@ Verify a `gpg`-created detached signature in Erlang:
 ok = openpgp_detached_sig:verify(Data, SigArmoredOrBinary, {rsa, [E, N]}).
 ok = openpgp_detached_sig:verify(Data, SigArmoredOrBinary, {ed25519, Pub32}).
 ```
+
+Besides the signature itself, verification requires a creation time, rejects
+signatures that are expired or carry an unknown critical subpacket, and
+accepts SHA-224, SHA-256, SHA-384, SHA-512, SHA3-256 and SHA3-512. Options
+in `verify/4` add checks: `sig_type`, `issuer_fpr`, `key_created`,
+`key_expires` and `now`. A signature block with signatures by several keys
+verifies when one of them does.
 
 Create a **binary** detached signature (no ASCII armor):
 

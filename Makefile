@@ -13,7 +13,7 @@ compile:
 	erlc +debug_info -Wall -Werror -o $(EBIN) src/*.erl test/*.erl
 
 test: compile
-	erl -noshell -pa $(EBIN) -eval 'eunit:test([openpgp_format_tests, openpgp_framing_tests, gpg_integration_tests], [verbose]), halt().'
+	erl -noshell -pa $(EBIN) -eval 'eunit:test([openpgp_format_tests, openpgp_framing_tests, openpgp_validity_tests, gpg_integration_tests], [verbose]), halt().'
 
 dialyzer-plt:
 	test -f $(PLT) || (dialyzer --build_plt --output_plt $(PLT) --apps $(DIALYZER_APPS) || test $$? -eq 2)

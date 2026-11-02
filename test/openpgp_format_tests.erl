@@ -335,28 +335,32 @@ bundle() ->
 
 bundle_import_verifies_bindings_test() ->
     {Packets, PubS, _, _} = bundle(),
-    {ok, #{self_certified := true, subkeys := [Sub]}} =
+    {ok, #{self_certified := true, userids := [<<"Bundle <b@example.com>">>], subkeys := [Sub]}} =
         openpgp_crypto:import_public_bundle(openpgp_packets:encode(Packets)),
     ?assertEqual({ed25519, PubS}, maps:get(pub, Sub)),
     ?assertEqual(16#02, maps:get(flags, Sub)),
     %% [primary, uid, selfsig, subkey, binding]
     [Prim, Uid, SelfSig, SubPkt, Binding] = Packets,
-    %% no self-certification: imported, but reported as such
-    {ok, #{self_certified := false}} =
+    %% no self-certification: imported, but reported as such, and the User
+    %% ID is left out
+    {ok, #{self_certified := false, userids := []}} =
         openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, SubPkt, Binding])),
     %% a binding that does not verify (subkey body tampered) rejects the subkey
     <<4:8, Created:32, Tail/binary>> = maps:get(body, SubPkt),
     Tampered = SubPkt#{body => <<4:8, (Created + 1):32, Tail/binary>>},
-    ?assertMatch({error, {unbound_subkey, _, _}},
+    ?assertMatch({ok, #{subkeys := [], rejected_subkeys := [#{reason := #{reason := bad_signature}}]}},
                  openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, SelfSig, Tampered, Binding]))),
     %% a subkey without any binding is rejected too
-    ?assertMatch({error, {unbound_subkey, _, no_binding_signature}},
+    ?assertMatch({ok, #{subkeys := [], rejected_subkeys := [#{reason := no_binding_signature}]}},
                  openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, SelfSig, SubPkt]))),
-    %% a self-certification that names the primary key but does not verify is an error
+    %% a self-certification that does not verify is ignored, as anyone can
+    %% append one
     <<SB1:20/binary, _:8, SBRest/binary>> = maps:get(body, SelfSig),
     BadSelf = SelfSig#{body => <<SB1/binary, 0:8, SBRest/binary>>},
-    ?assertMatch({error, {invalid_self_certification, _, _}},
-                 openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, BadSelf, SubPkt, Binding]))).
+    ?assertMatch({ok, #{self_certified := false, userids := []}},
+                 openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, BadSelf, SubPkt, Binding]))),
+    ?assertMatch({ok, #{self_certified := true, userids := [_]}},
+                 openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, BadSelf, SelfSig, SubPkt, Binding]))).
 
 %% A subkey that may sign, by its flags or for want of any, needs a valid
 %% back signature; one whose flags rule out signing does not.
@@ -373,10 +377,11 @@ bundle_import_requires_back_signature_test() ->
         #{packet := Binding} = openpgp_sig:subkey_binding(ed25519, #{priv => PrivP}, PrimBody, SubBody, BindOpts),
         openpgp_crypto:import_public_bundle(openpgp_packets:encode([Prim, Uid, SelfSig, SubPkt, Binding]))
     end,
-    ?assertMatch({error, {unbound_subkey, _, missing_back_signature}}, Import(#{subkey_flags => 16#02})),
-    ?assertMatch({error, {unbound_subkey, _, missing_back_signature}}, Import(#{})),
-    ?assertMatch({error, {unbound_subkey, _, invalid_back_signature}},
-                 Import(#{subkey_flags => 16#02, embedded_sig_body => BackSig(PrivOther)})),
+    Reason = fun({ok, #{subkeys := [], rejected_subkeys := [#{reason := R}]}}) -> R end,
+    ?assertEqual(missing_back_signature, Reason(Import(#{subkey_flags => 16#02}))),
+    ?assertEqual(missing_back_signature, Reason(Import(#{}))),
+    ?assertEqual(invalid_back_signature,
+                 Reason(Import(#{subkey_flags => 16#02, embedded_sig_body => BackSig(PrivOther)}))),
     ?assertMatch({ok, #{subkeys := [#{flags := undefined}]}}, Import(#{embedded_sig_body => BackSig(PrivS)})),
     ?assertMatch({ok, #{subkeys := [#{flags := 16#0C}]}}, Import(#{subkey_flags => 16#0C})).
 
