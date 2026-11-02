@@ -71,15 +71,22 @@ dash_escape_line(<<"From ", _/binary>> = L) -> <<"- ", L/binary>>;
 dash_escape_line(L) -> L.
 
 %% @doc Undo dash-escaping in cleartext signatures ("- " prefix).
--spec dash_unescape(iodata() | binary()) -> binary().
+%%
+%% A line that starts with "-" but not with "- " is malformed (RFC 9580 7.1).
+-spec dash_unescape(iodata() | binary()) -> {ok, binary()} | {error, {bad_dash_escape, binary()}}.
 dash_unescape(Text0) ->
     Text = iolist_to_binary(Text0),
     Lines = binary:split(Text, <<"\n">>, [global]),
-    Un = [dash_unescape_line(trim_cr(L)) || L <- Lines],
-    iolist_to_binary(join_lf(Un)).
+    dash_unescape_lines([trim_cr(L) || L <- Lines], []).
 
-dash_unescape_line(<<"- ", Rest/binary>>) -> Rest;
-dash_unescape_line(L) -> L.
+dash_unescape_lines([], Acc) ->
+    {ok, iolist_to_binary(join_lf(lists:reverse(Acc)))};
+dash_unescape_lines([<<"- ", Rest/binary>> | Lines], Acc) ->
+    dash_unescape_lines(Lines, [Rest | Acc]);
+dash_unescape_lines([<<"-", _/binary>> = L | _], _Acc) ->
+    {error, {bad_dash_escape, L}};
+dash_unescape_lines([L | Lines], Acc) ->
+    dash_unescape_lines(Lines, [L | Acc]).
 
 join_lf([]) -> [];
 join_lf([Last]) -> [Last];

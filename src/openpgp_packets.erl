@@ -7,6 +7,11 @@
 -export([decode/1, encode/1]).
 -export_type([packet/0]).
 
+%% Packets that may use partial body lengths (RFC 9580 4.2.2.4).
+-define(IS_DATA_PACKET(Tag),
+    (Tag =:= 8 orelse Tag =:= 9 orelse Tag =:= 11 orelse Tag =:= 18 orelse Tag =:= 20)
+).
+
 -type packet() :: #{
     tag := non_neg_integer(),
     format := old | new,
@@ -39,6 +44,8 @@ decode_packets(<<First:8, _/binary>> = Bin, Acc) ->
             end
     end.
 
+decode_old_packet(<<Hdr:8, _/binary>>, _Acc) when Hdr band 16#3C =:= 0 ->
+    {error, {reserved_tag, 0}};
 decode_old_packet(<<Hdr:8, Rest/binary>>, Acc) ->
     Tag = (Hdr band 16#3C) bsr 2,
     LenType = Hdr band 16#03,
@@ -69,6 +76,8 @@ decode_old_packet(<<Hdr:8, Rest/binary>>, Acc) ->
             decode_packets(<<>>, [#{tag => Tag, format => old, body => Rest} | Acc])
     end.
 
+decode_new_packet(<<Hdr:8, _/binary>>, _Acc) when Hdr band 16#3F =:= 0 ->
+    {error, {reserved_tag, 0}};
 decode_new_packet(<<Hdr:8, Rest/binary>>, Acc) ->
     Tag = Hdr band 16#3F,
     case decode_new_length(Rest) of
@@ -79,6 +88,10 @@ decode_new_packet(<<Hdr:8, Rest/binary>>, Acc) ->
                 _ ->
                     {error, truncated}
             end;
+        {ok, {partial, _Segs, _Tail0}} when not ?IS_DATA_PACKET(Tag) ->
+            {error, {partial_length_not_allowed, Tag}};
+        {ok, {partial, [SegLen], _Tail0}} when SegLen < 512 ->
+            {error, {partial_chunk_too_small, SegLen}};
         {ok, {partial, Segs, Tail0}} ->
             case take_partial_segments(Tail0, Segs, <<>>) of
                 {ok, {Body, Tail}} ->
@@ -102,7 +115,7 @@ decode_new_length(<<First:8, Rest/binary>>) when First >= 224, First =< 254 ->
     Pow = First band 16#1F,
     SegLen = 1 bsl Pow,
     {ok, {partial, [SegLen], Rest}};
-decode_new_length(<<>>) ->
+decode_new_length(_) ->
     {error, truncated}.
 
 take_partial_segments(Bin, SegLens, Acc) ->

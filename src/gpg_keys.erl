@@ -28,11 +28,15 @@ decode(Input0) ->
     case is_armored(Input) of
         true ->
             case openpgp_armor:decode(Input) of
-                {ok, Armor = #{data := Data}} ->
+                {ok, Armor = #{type := Type, data := Data}} when
+                    Type =:= <<"PGP PUBLIC KEY BLOCK">>; Type =:= <<"PGP PRIVATE KEY BLOCK">>
+                ->
                     case openpgp_packets:decode(Data) of
                         {ok, Packets} -> {ok, #{armor => Armor, packets => Packets}};
                         {error, _} = Err -> Err
                     end;
+                {ok, #{type := Type}} ->
+                    {error, {unexpected_armor_type, Type}};
                 {error, _} = Err ->
                     Err
             end;
@@ -71,10 +75,11 @@ encode_keyblock(Type, PacketsOrBin) when is_list(PacketsOrBin) ->
 encode_keyblock(Type, Bin) ->
     openpgp_armor:encode(Type, iolist_to_binary(Bin)).
 
-is_armored(Bin) when is_binary(Bin) ->
-    case binary:match(Bin, <<"-----BEGIN PGP ">>) of
-        nomatch -> false;
-        _ -> true
-    end.
+is_armored(<<C, Rest/binary>>) when C =:= $\s; C =:= $\t; C =:= $\r; C =:= $\n ->
+    is_armored(Rest);
+is_armored(<<"-----BEGIN PGP ", _/binary>>) ->
+    true;
+is_armored(_) ->
+    false.
 
 

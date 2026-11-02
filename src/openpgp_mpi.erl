@@ -18,7 +18,12 @@ decode_one(<<Bits:16/big-unsigned, Rest/binary>>) ->
     Bytes = (Bits + 7) div 8,
     case Rest of
         <<Val:Bytes/binary, Tail/binary>> ->
-            {ok, {Bits, Val, Tail}};
+            % Some implementations count leading zero bits (e.g. a fixed 256 for
+            % EdDSA r and s), so only a value longer than its count is rejected.
+            case bitlen(strip_leading_zeros(Val)) of
+                Actual when Actual =< Bits -> {ok, {Bits, Val, Tail}};
+                Actual -> {error, {bad_mpi_length, Bits, Actual}}
+            end;
         _ ->
             {error, truncated}
     end;
